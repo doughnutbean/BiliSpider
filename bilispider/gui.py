@@ -238,6 +238,25 @@ class BiliSpiderGUI:
         )
         self._crawl_stop_btn.pack(side=tk.LEFT, padx=4)
 
+        # 基准测试按钮
+        tk.Label(btn_row, text="基准:", font=("Microsoft YaHei", 9), bg=_COLOR_CARD, fg="#888").pack(side=tk.LEFT, padx=(12, 2))
+        for label, mode, sec in [("快速", "quick", 30), ("中测", "medium", 120), ("通宵", "overnight", 480)]:
+            btn = tk.Button(btn_row, text=f"{mode}", width=4,
+                            command=lambda m=mode: self._start_benchmark(m),
+                            bg="#8a8a8a", fg="white", font=("Microsoft YaHei", 8),
+                            relief=tk.FLAT, padx=4, pady=1, cursor="hand2")
+            btn.pack(side=tk.LEFT, padx=1)
+            tk.Tooltip = type("Tooltip", (), {})
+            # 简单tooltip: 用title属性
+            setattr(btn, "tooltip_timer", None)
+            def _enter(_e, t=f"{label}({sec}min)"): pass  # 简单的title提示
+        tk.Label(btn_row, text="", font=("Microsoft YaHei", 8), bg=_COLOR_CARD).pack(side=tk.LEFT)
+
+        # 基准测试实时指标
+        self._bench_metrics_var = tk.StringVar(value="")
+        tk.Label(btn_row, textvariable=self._bench_metrics_var,
+                 font=("Microsoft YaHei", 8), bg=_COLOR_CARD, fg=_COLOR_BILI_BLUE).pack(side=tk.LEFT, padx=6)
+
         self._crawl_stats_var = tk.StringVar(value="就绪")
         tk.Label(btn_row, textvariable=self._crawl_stats_var,
                  font=("Microsoft YaHei", 9), bg=_COLOR_CARD, fg="#666").pack(side=tk.RIGHT)
@@ -373,6 +392,67 @@ class BiliSpiderGUI:
         self._crawl_start_btn.configure(state=tk.NORMAL)
         self._crawl_stop_btn.configure(state=tk.DISABLED)
         self._crawl_log_append("\n[!] 已发送停止信号,等待当前请求完成...\n")
+
+    def _start_benchmark(self, mode: str) -> None:
+        """启动基准测试 (quick/medium/overnight)。"""
+        import benchmark
+        PRESETS = benchmark.PRESETS
+        BenchmarkRunner = benchmark.BenchmarkRunner
+        if mode not in PRESETS:
+            return
+        cfg = PRESETS[mode]
+        uid = self._crawl_uid_entry.get().strip() or "2"
+        self._crawl_log_append(f"\n=== 基准测试: {cfg['label']} ===\n")
+
+        self._crawling = True
+        self._crawl_start_btn.configure(state=tk.DISABLED)
+        self._crawl_stop_btn.configure(state=tk.NORMAL)
+
+        runner = BenchmarkRunner(duration_min=cfg["duration_min"], uid=uid)
+        self._bench_runner = runner
+
+        def _run() -> None:
+            report = runner.run()
+            self.root.after(0, lambda: self._bench_done(report))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+        # 启动实时指标轮询
+        self._poll_bench_metrics()
+
+    def _poll_bench_metrics(self) -> None:
+        """定时轮询基准测试实时指标。"""
+        if not self._crawling:
+            return
+        runner = getattr(self, "_bench_runner", None)
+        if runner:
+            m = runner.get_live_metrics()
+            if m:
+                elapsed = m.get("elapsed_min", 0)
+                remaining = m.get("remaining_min", 0)
+                req = m.get("req_per_min", 0)
+                state = m.get("state", "?")
+                self._bench_metrics_var.set(
+                    f"{elapsed:.0f}/{elapsed+remaining:.0f}min | {req:.0f}rpm | {state}"
+                )
+        self.root.after(3000, self._poll_bench_metrics)  # 每3秒刷新
+
+    def _bench_done(self, report: dict) -> None:
+        """基准测试完成。"""
+        self._crawling = False
+        self._crawl_start_btn.configure(state=tk.NORMAL)
+        self._crawl_stop_btn.configure(state=tk.DISABLED)
+        self._bench_metrics_var.set("完成")
+
+        import benchmark
+        import io, sys
+        buf = io.StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        benchmark.print_report(report)
+        sys.stdout = old
+        self._crawl_log_append(buf.getvalue())
+        self._set_status(f"基准测试完成: {report.get('total_requests',0)}请求")
 
     def _update_crawl_progress(self, current: int, total: int, label: str):
         """更新进度条和标签。"""
