@@ -1134,7 +1134,7 @@ class CommentCrawler:
                 if len(sub_replies) < _PAGE_SIZE:
                     break  # 最后一页
 
-                self._delay(extra=1.0)  # 子评论页间延迟
+                self._delay()  # 统一速率控制
                 page_num += 1
 
             # 标记该根评论子评论完成
