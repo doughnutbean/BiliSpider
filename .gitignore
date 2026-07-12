@@ -22,3 +22,7 @@ Thumbs.db
 .env
 *cookie*
 !bilispider/cookie*
+*.db
+*.db-shm
+*.db-wal
+_test_*.py
