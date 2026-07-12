@@ -99,6 +99,9 @@ class RateController:
         self._snooze_duration = 600.0         # 沉睡时长(秒), 起始10分钟
         self._snooze_until = 0.0              # 沉睡到的时间戳
         self._cooling_count = 0               # 进入冷却次数
+        self._snooze_exit_time = 0.0          # 上次沉睡退出时间
+        self._snooze_locked = False           # 是否已锁定最佳沉睡时长
+        self._global_snooze_duration = 0.0    # 学习到的最佳沉睡时长
 
     # ── 公共接口 ──
 
@@ -124,6 +127,14 @@ class RateController:
         stable_duration = now - self._stable_since
         if stable_duration < self._tune_interval:
             return
+        # 沉睡调优: 沉睡后稳定超过20分钟 -> 锁定当前沉睡时长
+        if self._snooze_exit_time > 0 and not self._snooze_locked:
+            stable_since_snooze = now - self._snooze_exit_time
+            if stable_since_snooze > self._tune_interval:
+                self._global_snooze_duration = self._snooze_duration
+                self._snooze_locked = True
+                print(f"  [TUNE] 沉睡时长锁定: {self._global_snooze_duration/60:.0f}min (恢复后稳定{stable_since_snooze/60:.0f}min)")
+                self._snooze_exit_time = 0.0
         # 已学习到安全速率上限,将延迟锁定在安全值上
         if self._global_max_rate > 0:
             safe_delay = 60.0 / self._global_max_rate
@@ -196,6 +207,12 @@ class RateController:
             current_rate = self._compute_current_rate()
             if current_rate > 0:
                 self._412_rates.append(current_rate)
+                # 沉睡调优: 沉睡后很快又412 -> 沉睡时间不够
+                if self._snooze_exit_time > 0 and not self._snooze_locked:
+                    since_snooze = now - self._snooze_exit_time
+                    if since_snooze < self._tune_interval:
+                        self._snooze_duration *= 1.5
+                        print(f"  [TUNE] 沉睡时长不足(恢复后{since_snooze/60:.0f}min就412), 增至{self._snooze_duration/60:.0f}min")
                 entry["trigger_rate"] = round(current_rate, 1)
                 print(f"  [TUNE] 412触发时速率: {current_rate:.1f} req/min")
                 # 收集足够样本后,取最小触发速率,在下方设安全上限
@@ -343,20 +360,23 @@ class RateController:
         return msg
 
     def _enter_snooze(self) -> None:
-        """进入沉睡状态,自适应倍增沉睡时长。"""
+        """进入沉睡状态,时长自动调优。"""
         self._state = self.STATE_SNOOZE
         self._cooling_count += 1
-        # 每次冷却沉睡时长大2倍: 10min→20min→40min→80min...
-        self._snooze_duration = 600.0 * (2 ** (self._cooling_count - 1))
+        # 已锁定: 用最佳时长; 否则: 自适应倍增
+        if self._snooze_locked and self._global_snooze_duration > 0:
+            self._snooze_duration = self._global_snooze_duration
+        else:
+            self._snooze_duration = 600.0 * (2 ** (self._cooling_count - 1))
         self._base_delay = 2.0
         self._jitter = 2.0
 
     def _exit_snooze(self) -> None:
         """退出沉睡,恢复正常模式。"""
         self._state = self.STATE_NORMAL
+        self._snooze_exit_time = time.time()
         self._stable_since = time.time()
         self._success_streak = 0
-        # 沉睡后重置412计数器(保留档案)
         self._412_events = []
 
 
