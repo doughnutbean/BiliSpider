@@ -12,6 +12,8 @@ B站数据爬取工具 —— Tkinter 图形化界面。
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 import threading
 import tkinter as tk
@@ -63,8 +65,55 @@ class BiliSpiderGUI:
         self._login_status_var = tk.StringVar(value="未登录")
         self._status_bar_var = tk.StringVar(value="就绪")
 
+        self._config_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json"
+        )
+
         self._build_ui()
+        self._load_config()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._check_login_on_start()
+
+    # ─── 配置持久化 ─────────────────────────────────────────────
+
+    def _load_config(self) -> None:
+        """从 config.json 恢复上次填入的数据。"""
+        try:
+            with open(self._config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            self._uid_entry.delete(0, tk.END)
+            self._uid_entry.insert(0, cfg.get("query_uid", "2"))
+            self._crawl_uid_entry.delete(0, tk.END)
+            self._crawl_uid_entry.insert(0, cfg.get("crawl_uid", "2"))
+            self._crawl_days_var.set(cfg.get("crawl_days", "30"))
+            self._crawl_max_var.set(cfg.get("crawl_max", "5"))
+            self._crawl_proxy_entry.delete(0, tk.END)
+            self._crawl_proxy_entry.insert(0, cfg.get("proxy", ""))
+            self._search_uid_entry.delete(0, tk.END)
+            self._search_uid_entry.insert(0, cfg.get("search_uid", "2"))
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+            pass
+
+    def _save_config(self) -> None:
+        """保存当前GUI输入值到 config.json。"""
+        cfg = {
+            "query_uid": self._uid_entry.get().strip(),
+            "crawl_uid": self._crawl_uid_entry.get().strip(),
+            "crawl_days": self._crawl_days_var.get(),
+            "crawl_max": self._crawl_max_var.get(),
+            "proxy": self._crawl_proxy_entry.get().strip(),
+            "search_uid": self._search_uid_entry.get().strip(),
+        }
+        try:
+            with open(self._config_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _on_close(self) -> None:
+        """窗口关闭时保存配置。"""
+        self._save_config()
+        self.root.destroy()
 
     # ─── UI 构建 ───────────────────────────────────────────────
 
