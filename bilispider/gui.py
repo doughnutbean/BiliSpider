@@ -496,6 +496,10 @@ class BiliSpiderGUI:
         tk.Button(toolbar, text="导出Excel", command=lambda: self._export_to_excel_v2(uid, rows),
                   bg=_COLOR_BILI_BLUE, fg="white", font=_FONT_BODY,
                   relief=tk.FLAT, padx=12, pady=2, cursor="hand2").pack(side=tk.RIGHT, padx=4)
+        copy_btn = tk.Button(toolbar, text="复制选中行", command=lambda: self._copy_selected_rows(tree),
+                             bg="#666", fg="white", font=_FONT_BODY,
+                             relief=tk.FLAT, padx=12, pady=2, cursor="hand2")
+        copy_btn.pack(side=tk.RIGHT, padx=4)
 
         # 表格
         tree_frame = tk.Frame(win, bg=_COLOR_CARD)
@@ -534,6 +538,32 @@ class BiliSpiderGUI:
                 import webbrowser
                 webbrowser.open(f"https://www.bilibili.com/video/av{oid}")
         tree.bind("<Double-1>", _on_double_click)
+
+        # 右键菜单
+        rmenu = tk.Menu(win, tearoff=0)
+        rmenu.add_command(label="复制选中行", command=lambda: self._copy_selected_rows(tree))
+        rmenu.add_command(label="全选 (Ctrl+A)", command=lambda: tree.selection_set(tree.get_children()))
+        def _on_right_click(event):
+            try: rmenu.tk_popup(event.x_root, event.y_root)
+            finally: rmenu.grab_release()
+        tree.bind("<Button-3>", _on_right_click)
+        # Ctrl+C 快捷键
+        win.bind("<Control-c>", lambda e: self._copy_selected_rows(tree))
+
+    def _copy_selected_rows(self, tree: ttk.Treeview) -> None:
+        """复制 Treeview 中选中行的内容到剪贴板。"""
+        items = tree.selection()
+        if not items:
+            return
+        lines = []
+        for item in items:
+            vals = tree.item(item, "values")
+            # 格式: 时间 | 来源 | 层级 | oid | rpid | 内容
+            lines.append(f"{vals[0]}\t{vals[1]}\t{vals[2]}\t{vals[3]}\t{vals[4]}\t{vals[5]}")
+        text = "\n".join(lines)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self._set_status(f"已复制 {len(items)} 行到剪贴板")
 
     def _export_to_excel_v2(self, uid: str, rows: list[dict]) -> None:
         """导出融合结果为 Excel。"""
