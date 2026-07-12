@@ -1040,7 +1040,7 @@ class CommentCrawler:
                     self._progress_cb(idx, total, v['title'][:30])
 
                 aid = v["aid"]
-                print(f"\n[2/3] 视频 {idx}/{len(videos)}: {v['title'][:40]} (aid={aid})")
+                print(f"\n  视频 {idx}/{len(videos)}: {v['title'][:40]} (aid={aid})")
 
                 # 爬一级评论
                 root_crawled = self.crawl_root_comments(aid)
