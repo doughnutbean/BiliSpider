@@ -611,8 +611,8 @@ class CommentCrawler:
             inserted = self.db.insert_comments_batch(records)
             crawled += len(records)
 
-            total = result["data"]["page"]["count"]
-            print(f"    aid={oid} 一级评论 p{page_num}: "
+            total = result["data"]["page"].get("acount", result["data"]["page"]["count"])
+            print(f"    aid={oid} 评论 p{page_num}: "
                   f"获取 {len(records)} 条 (累计 {crawled}/{total})")
 
             self.db.upsert_progress(oid, ctype,
