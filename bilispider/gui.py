@@ -345,63 +345,135 @@ class BiliSpiderGUI:
         ).start()
 
     def _do_query(self, uid: str, cookie: str) -> None:
-        """在后台线程中执行用户信息和视频列表查询。"""
-        # ── 查询用户信息 ──
+        """在后台线程中执行用户信息、统计数据和视频列表查询。"""
+        import requests
+
+        # ── 公共请求头模板 ──
+        base_headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/119.0.0.0 Safari/537.36"
+            ),
+            "Referer": f"https://space.bilibili.com/{uid}/",
+            "Cookie": cookie,
+        }
+
+        # ── 第一步: 获取 WBI 密钥 (只需一次) ──
         try:
             img_key, sub_key = get_wbi_keys()
-            import requests
+        except Exception as e:
+            self.root.after(0, lambda: self._show_error(f"获取 WBI 密钥失败: {e}"))
+            return
+
+        # ── 第二步: 并行请求四个接口 ──
+        # 接口1: 用户基本信息
+        info_result = None
+        try:
             signed = enc_wbi({"mid": uid}, img_key=img_key, sub_key=sub_key)
-            headers = {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/119.0.0.0 Safari/537.36"
-                ),
-                "Referer": f"https://space.bilibili.com/{uid}/",
-                "Cookie": cookie,
-            }
             resp = requests.get(
                 "https://api.bilibili.com/x/space/wbi/acc/info",
-                params=signed, headers=headers, timeout=10,
+                params=signed, headers=base_headers, timeout=10,
             )
             resp.raise_for_status()
             info_result = resp.json()
-        except Exception as e:
-            self.root.after(0, lambda: self._show_error(f"用户信息查询失败: {e}"))
-            return
+        except Exception:
+            pass
 
-        # ── 查询视频列表 ──
+        # 接口2: 关注/粉丝数统计
+        stat_result = None
         try:
-            import requests as req2
-            img_key2, sub_key2 = get_wbi_keys()
+            signed_s = enc_wbi({"vmid": uid}, img_key=img_key, sub_key=sub_key)
+            resp = requests.get(
+                "https://api.bilibili.com/x/relation/stat",
+                params=signed_s, headers=base_headers, timeout=10,
+            )
+            resp.raise_for_status()
+            stat_result = resp.json()
+        except Exception:
+            pass
+
+        # 接口3: 获赞/播放量统计
+        upstat_result = None
+        try:
+            signed_u = enc_wbi({"mid": uid}, img_key=img_key, sub_key=sub_key)
+            resp = requests.get(
+                "https://api.bilibili.com/x/space/upstat",
+                params=signed_u, headers=base_headers, timeout=10,
+            )
+            resp.raise_for_status()
+            upstat_result = resp.json()
+        except Exception:
+            pass
+
+        # 接口4: 视频列表
+        video_result = None
+        try:
             video_params = enc_wbi({
                 "mid": uid, "ps": 30, "tid": 0, "pn": 1,
                 "keyword": "", "order": "pubdate", "platform": "web",
                 "web_location": 1550101, "order_avoided": "true",
-            }, img_key=img_key2, sub_key=sub_key2)
-            headers2 = {
-                "User-Agent": headers["User-Agent"],
-                "Referer": f"https://space.bilibili.com/{uid}/video",
-                "Cookie": cookie,
-            }
-            resp2 = req2.get(
+            }, img_key=img_key, sub_key=sub_key)
+            video_headers = dict(base_headers, Referer=f"https://space.bilibili.com/{uid}/video")
+            resp = requests.get(
                 "https://api.bilibili.com/x/space/wbi/arc/search",
-                params=video_params, headers=headers2, timeout=15,
+                params=video_params, headers=video_headers, timeout=15,
             )
-            resp2.raise_for_status()
-            video_result = resp2.json()
-        except Exception as e:
-            video_result = None
+            resp.raise_for_status()
+            video_result = resp.json()
+        except Exception:
+            pass
 
-        self.root.after(0, lambda: self._display_results(uid, info_result, video_result))
+        # 任何接口都没拿到数据则报错
+        if info_result is None and stat_result is None:
+            self.root.after(0, lambda: self._show_error("查询失败: 网络异常或 Cookie 失效"))
+            return
 
-    def _display_results(self, uid: str, info: dict, video: Optional[dict]) -> None:
-        """在主线程中展示查询结果。"""
+        self.root.after(
+            0, lambda: self._display_results(
+                uid, info_result, stat_result, upstat_result, video_result,
+            )
+        )
+
+    def _display_results(
+        self, uid: str,
+        info: Optional[dict],
+        stat: Optional[dict],
+        upstat: Optional[dict],
+        video: Optional[dict],
+    ) -> None:
+        """
+        在主线程中展示查询结果。
+
+        数据来源:
+          info  — /x/space/wbi/acc/info   (用户名/等级/性别/签名/生日)
+          stat  — /x/relation/stat        (粉丝数/关注数)
+          upstat — /x/space/upstat         (获赞数/总播放量)
+          video — /x/space/wbi/arc/search  (视频列表)
+        """
         self._query_btn.configure(state=tk.NORMAL, text="🔍 查询")
 
         # ── 用户信息展示 ──
-        if info.get("code") == 0:
+        if info and info.get("code") == 0:
             data = info["data"]
+
+            # 从 stat 接口提取粉丝/关注数
+            follower_num = 0
+            following_num = 0
+            if stat and stat.get("code") == 0:
+                sd = stat["data"]
+                follower_num = sd.get("follower", 0)
+                following_num = sd.get("following", 0)
+
+            # 从 upstat 接口提取获赞数/播放量
+            likes_num = 0
+            total_views = 0
+            if upstat and upstat.get("code") == 0:
+                ud = upstat["data"]
+                likes_num = ud.get("likes", 0)
+                archive = ud.get("archive", {})
+                total_views = archive.get("view", 0) if isinstance(archive, dict) else 0
+
             lines = [
                 "═" * 50,
                 f"  用户信息 (UID: {uid})",
@@ -412,14 +484,15 @@ class BiliSpiderGUI:
                 f"  性别     : {data.get('sex', 'N/A')}",
                 f"  签名     : {data.get('sign', '')}",
                 f"  生日     : {data.get('birthday', 'N/A')}",
-                f"  粉丝数   : {data.get('follower', 0):,}",
-                f"  关注数   : {data.get('following', 0):,}",
-                f"  获赞数   : {data.get('likes', 0):,}",
+                f"  粉丝数   : {follower_num:,}",
+                f"  关注数   : {following_num:,}",
+                f"  获赞数   : {likes_num:,}",
+                f"  总播放量 : {total_views:,}",
                 "",
             ]
         else:
             lines = [
-                f"❌ 查询失败: code={info.get('code')}, {info.get('message', '')}",
+                f"❌ 查询失败: {info.get('message', '网络异常') if info else '无响应'}",
                 "",
             ]
 
