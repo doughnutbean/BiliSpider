@@ -459,8 +459,15 @@ class BiliSpiderGUI:
             return
         uid = self._crawl_uid_entry.get().strip()
         if not uid.isdigit():
-            messagebox.showwarning("提示", "请输入有效的目标 UID")
-            return
+            # 输入为空时尝试从队列取第一个UID
+            queue = self._load_queue()
+            if queue:
+                uid = queue[0]
+                self._crawl_uid_entry.delete(0, tk.END)
+                self._crawl_uid_entry.insert(0, uid)
+            else:
+                messagebox.showwarning("提示", "请输入有效的目标 UID 或先添加到待爬队列")
+                return
 
         # 解析参数
         days = int(self._crawl_days_var.get() or 0)
