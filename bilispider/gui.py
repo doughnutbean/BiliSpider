@@ -201,20 +201,24 @@ class BiliSpiderGUI:
 
         tk.Label(row1, text="最近天数:", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT, padx=(16, 0))
         self._crawl_days_var = tk.StringVar(value="30")
-        tk.Spinbox(row1, textvariable=self._crawl_days_var, from_=1, to=365,
+        tk.Spinbox(row1, textvariable=self._crawl_days_var, from_=0, to=365,
                    width=5, font=_FONT_BODY).pack(side=tk.LEFT, padx=4)
+        tk.Label(row1, text="(0=不限)", font=("Microsoft YaHei", 8),
+                 bg=_COLOR_CARD, fg="#888").pack(side=tk.LEFT)
 
         tk.Label(row1, text="最大视频:", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT, padx=(16, 0))
         self._crawl_max_var = tk.StringVar(value="5")
-        tk.Spinbox(row1, textvariable=self._crawl_max_var, from_=1, to=100,
+        tk.Spinbox(row1, textvariable=self._crawl_max_var, from_=0, to=500,
                    width=5, font=_FONT_BODY).pack(side=tk.LEFT, padx=4)
+        tk.Label(row1, text="(0=不限)", font=("Microsoft YaHei", 8),
+                 bg=_COLOR_CARD, fg="#888").pack(side=tk.LEFT)
 
         row2 = tk.Frame(cfg, bg=_COLOR_CARD)
         row2.pack(fill=tk.X, pady=2)
         tk.Label(row2, text="代理:", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT)
         self._crawl_proxy_entry = tk.Entry(row2, font=_FONT_BODY, width=38)
         self._crawl_proxy_entry.pack(side=tk.LEFT, padx=6)
-        tk.Label(row2, text="(如 http://127.0.0.1:7890)", font=("Microsoft YaHei", 8),
+        tk.Label(row2, text="(留空=flclash自动检测 / haipproxy池)", font=("Microsoft YaHei", 8),
                  bg=_COLOR_CARD, fg="#888").pack(side=tk.LEFT)
 
         # ── 控制按钮 ──
