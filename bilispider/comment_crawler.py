@@ -79,16 +79,20 @@ class RateController:
 
     def __init__(self) -> None:
         self._state = self.STATIC_NORMAL
-        self._412_events: list[dict] = []  # 最近的412事件
+        self._412_events: list[dict] = []  # 所有412事件(持久化)
+        self._412_archive: list[dict] = [] # 归档的412(不参与计数)
         self._request_times: list[float] = []  # 最近请求时间
         self._success_streak = 0            # 连续成功次数
         self._base_delay = 2.0              # 当前基础延迟
         self._jitter = 2.0                  # 当前抖动范围
+        self._total_requests = 0            # 总请求计数
+        self._total_success = 0             # 总成功计数
 
     # ── 公共接口 ──
 
     def on_request(self) -> float:
         """每次请求前调用,返回应等待的秒数。"""
+        self._total_requests += 1
         self._request_times.append(time.time())
         # 只保留最近5分钟
         cutoff = time.time() - 300
@@ -97,6 +101,7 @@ class RateController:
 
     def on_success(self) -> None:
         """请求成功后调用,累积恢复进度。"""
+        self._total_success += 1
         self._success_streak += 1
         # 连续成功10次 + 当前非NORMAL → 进入恢复模式
         if self._state != self.STATIC_NORMAL and self._success_streak >= 10:
@@ -105,13 +110,32 @@ class RateController:
     def on_412(self, url: str, api_type: str) -> str:
         """遇到412时调用,返回状态变化描述。"""
         now = time.time()
-        self._412_events.append({
-            "time": now, "url": url[:80], "api": api_type,
+        # 提取接口路径 (不含参数)
+        api_path = url.split("?")[0] if "?" in url else url
+        api_name = api_path.rsplit("/", 1)[-1] if "/" in api_path else api_path
+
+        # 计算距上次412的间隔
+        last_412 = self._412_events[-1]["time"] if self._412_events else None
+        interval_since_last = round(now - last_412, 1) if last_412 else None
+
+        entry = {
+            "time": now,
+            "time_str": time.strftime("%H:%M:%S", time.localtime(now)),
+            "url": api_path[:80],
+            "api": api_type,
+            "api_name": api_name,
             "state_before": self._state,
-        })
-        # 只保留最近30分钟
-        self._412_events = [e for e in self._412_events if now - e["time"] < 1800]
-        recent_count = len(self._412_events)
+            "total_requests": self._total_requests,
+            "interval_since_last_412": interval_since_last,
+            "recent_5min_requests": len(self._request_times),
+        }
+        self._412_events.append(entry)
+        self._412_archive.append(entry)
+
+        # 只保留最近30分钟的412用于速率控制决策
+        recent_412 = [e for e in self._412_events if now - e["time"] < 1800]
+        self._412_events = recent_412
+        recent_count = len(recent_412)
         self._success_streak = 0
 
         if recent_count >= 3:
@@ -119,7 +143,6 @@ class RateController:
         elif recent_count == 2:
             return self._enter_warning(recent_count)
         else:
-            # 单次412: 仍然触发轻量警告
             return self._enter_warning(recent_count)
 
     def get_state(self) -> str:
@@ -134,7 +157,81 @@ class RateController:
     def get_412_log(self) -> list[dict]:
         return self._412_events[-10:]  # 最近10条
 
-    # ── 状态转换 ──
+    def dump_report(self) -> str:
+        """输出412触发画像复盘报告。"""
+        if not self._412_archive:
+            return "[RATE] 本次会话无412事件"
+
+        lines = ["", "=" * 60, "  412 风控事件复盘报告", "=" * 60]
+
+        # ── 总量统计 ──
+        total_412 = len(self._412_archive)
+        rate = total_412 / max(self._total_requests, 1) * 100
+        lines.append(f"  总请求: {self._total_requests}  |  成功: {self._total_success}")
+        lines.append(f"  412次数: {total_412}  |  412率: {rate:.1f}%")
+
+        # ── 接口分布 ──
+        api_counter: dict[str, int] = {}
+        for e in self._412_archive:
+            name = e["api_name"]
+            api_counter[name] = api_counter.get(name, 0) + 1
+        lines.append(f"\n  ── 412 接口分布 ──")
+        for name, cnt in sorted(api_counter.items(), key=lambda x: -x[1]):
+            pct = cnt / total_412 * 100
+            bar = "█" * int(pct / 5 + 0.5)
+            lines.append(f"    {name:20s} {cnt:3d}次 ({pct:5.1f}%) {bar}")
+
+        # ── 时间分布 ──
+        hour_buckets: dict[int, int] = {}
+        for e in self._412_archive:
+            h = time.localtime(e["time"]).tm_hour
+            hour_buckets[h] = hour_buckets.get(h, 0) + 1
+        if len(hour_buckets) > 1:
+            lines.append(f"\n  ── 412 时段分布 ──")
+            for h in sorted(hour_buckets):
+                lines.append(f"    {h:02d}:00  {hour_buckets[h]}次")
+
+        # ── 间隔分析 ──
+        intervals = [
+            e["interval_since_last_412"]
+            for e in self._412_archive
+            if e["interval_since_last_412"] is not None
+        ]
+        if intervals:
+            avg_interval = sum(intervals) / len(intervals)
+            min_interval = min(intervals)
+            lines.append(f"\n  ── 412 触发间隔 ──")
+            lines.append(f"    平均间隔: {avg_interval:.1f}s")
+            lines.append(f"    最短间隔: {min_interval:.1f}s")
+            # 聚簇检测
+            short_clusters = [i for i in intervals if i < 30]
+            if short_clusters:
+                lines.append(f"    密集(间隔<30s): {len(short_clusters)}次 → 可能是频率型风控")
+
+        # ── 状态转换链路 ──
+        state_changes: list[str] = []
+        for e in self._412_archive:
+            state_changes.append(f"{e['state_before']}→")
+        lines.append(f"\n  ── 状态转换链 ──")
+        lines.append(f"    {' → '.join(state_changes[:20])}")
+
+        # ── 诊断结论 ──
+        lines.append(f"\n  ── 诊断 ──")
+        if rate > 5:
+            if short_clusters and len(short_clusters) > 3:
+                lines.append("    结论: 频率触发型 — 请求过于密集")
+                lines.append("    建议: 增加基础延迟,减少并发")
+            else:
+                lines.append("    结论: 请求指纹标记型 — Cookie/UA/代理可能被标记")
+                lines.append("    建议: 更换代理,刷新Cookie,多样化UA")
+        elif api_counter.get("reply", 0) > api_counter.get("search", 0) * 2:
+            lines.append("    结论: 接口敏感型 — 评论接口(reply)更易触发412")
+            lines.append("    建议: 对reply接口使用更长延迟,减少子评论爬取范围")
+        else:
+            lines.append("    结论: 偶发型 — 控制尚可,维持现有策略")
+
+        lines.append("=" * 60)
+        return "\n".join(lines)
 
     def _enter_warning(self, count: int) -> str:
         self._state = self.STATIC_WARNING
@@ -968,6 +1065,9 @@ class CommentCrawler:
             print(f"  子评论  : {total_subs}")
             print(f"  数据库总计: {stats['total']} 条")
             print(f"  已完成视频: {stats['videos_done']}")
+
+            # 输出412复盘报告
+            print(self._rate_ctrl.dump_report())
 
             return {
                 "total_root": total_root,
