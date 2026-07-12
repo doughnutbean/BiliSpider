@@ -168,10 +168,9 @@ class RateController:
         return msg
 
 
-# B站评论分页上限 (实测)
-_MAX_ROOT_PAGES = 200      # 一级评论安全上限 (200页 x 20条 = 4000条,足够)
-_MAX_SUB_PAGES = 10        # 子评论最多翻 10 页 (保守)
+# B站评论分页
 _PAGE_SIZE = 20            # 每页条数
+# 页数无上限,由B站API自然停止(返回空页时break)
 
 # 代理配置 (支持 HTTP/HTTPS 代理轮换)
 # 格式: ["http://host:port", "https://host:port", ...]
@@ -681,8 +680,9 @@ class CommentCrawler:
 
         start_page = progress["root_pages_done"] + 1
         crawled = 0
+        page_num = start_page
 
-        for page_num in range(start_page, _MAX_ROOT_PAGES + 1):
+        while True:
             if self._cancelled:
                 break
 
@@ -761,14 +761,14 @@ class CommentCrawler:
             )
 
             self._delay()
+            page_num += 1
 
-        else:
-            # 自然结束 (所有页都爬完了)
-            self.db.upsert_progress(oid, ctype,
-                root_pages_done=_MAX_ROOT_PAGES,
-                status="done",
-                total_root=crawled,
-            )
+        # 正常结束 (API返回空页 or 时间截断)
+        self.db.upsert_progress(oid, ctype,
+            root_pages_done=page_num,
+            status="done",
+            total_root=crawled,
+        )
 
         return crawled
 
@@ -828,8 +828,9 @@ class CommentCrawler:
                 print(f"    aid={oid} 子评论: 处理第 {root_processed}/{pending} 条根评论...")
 
             start_page = (sub_progress.get(root_rpid_str, 0) // _PAGE_SIZE) + 1
+            page_num = start_page
 
-            for page_num in range(start_page, _MAX_SUB_PAGES + 1):
+            while True:
                 if self._cancelled:
                     break
 
@@ -887,6 +888,7 @@ class CommentCrawler:
                     break  # 最后一页
 
                 self._delay(extra=0.5)  # 子评论多加一点延迟
+                page_num += 1
 
             # 标记该根评论子评论完成
             sub_progress[root_rpid_str] = sub_count
