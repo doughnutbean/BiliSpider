@@ -665,9 +665,12 @@ class CommentCrawler:
                 if resp.status_code == 412:
                     api_type = "reply" if "/reply" in url else "search" if "search" in url else "other"
                     self._rate_ctrl.on_412(url, api_type)
-                    # 冷却模式: 放弃重试, 让上层调用自然降速
-                    if self._rate_ctrl.get_state() == RateController.STATIC_COOLING:
-                        print(f"  [!] 已进入冷却模式,放弃当前请求重试")
+                    state = self._rate_ctrl.get_state()
+                    # 冷却模式下再遇412: Cookie/代理已被标记,直接终止爬取
+                    if state == RateController.STATIC_COOLING:
+                        print(f"  [!] 连续412 — Cookie/代理可能已被标记,终止爬取")
+                        print(f"  [!] 建议: 更换代理、等待10分钟后刷新Cookie重新登录")
+                        self._cancelled = True
                         return None
                     delay = self._rate_ctrl.on_request()
                     time.sleep(delay)
@@ -1060,14 +1063,15 @@ class CommentCrawler:
 
             # 统计
             stats = db.get_stats()
+
+            # 412 复盘报告
+            print(self._rate_ctrl.dump_report())
+
             print(f"\n[3/3] 爬取完成!")
             print(f"  一级评论: {total_root}")
             print(f"  子评论  : {total_subs}")
             print(f"  数据库总计: {stats['total']} 条")
             print(f"  已完成视频: {stats['videos_done']}")
-
-            # 输出412复盘报告
-            print(self._rate_ctrl.dump_report())
 
             return {
                 "total_root": total_root,
