@@ -4,24 +4,26 @@
 对 /x/space/wbi/arc/search 接口发起请求,支持分页获取。
 
 用法:
+    # 第一步: 先扫码登录
+    python login.py
+
+    # 第二步: 获取视频列表
     python get_user_videos.py
 
-前提：
-    1. 填入有效的 B站 Cookie
-    2. 填入目标用户的 UID (mid)
+Cookie 自动从 cookies.json 加载,只需在脚本中填入目标用户的 UID 和页码。
 """
 
 import requests
 
+from bilispider.login import get_cookie_string, is_logged_in
 from bilispider.wbi import enc_wbi, get_wbi_keys
 
 
 # ============================================================
 # ⚠️ 使用前请修改以下变量
 # ============================================================
-MY_COOKIE = "Input_your_cookie_here"       # 你的 B站 Cookie (建议填写)
-TARGET_UID = "2"                           # 目标用户的 UID (B站站长 bishi 的 UID 为 2)
-PAGE_NUM = 1                               # 要获取的页码 (从 1 开始)
+TARGET_UID = "2"           # 目标用户的 UID (B站站长 bishi 的 UID 为 2)
+PAGE_NUM = 1               # 要获取的页码 (从 1 开始)
 
 
 def get_user_videos(uid: str, cookie: str = "", page_num: int = 1) -> None:
@@ -107,7 +109,16 @@ def get_user_videos(uid: str, cookie: str = "", page_num: int = 1) -> None:
 
 # --- 主程序入口 ---
 if __name__ == "__main__":
-    if "SESSDATA" not in MY_COOKIE or MY_COOKIE == "Input_your_cookie_here":
-        print("❌ 错误: 请在脚本中填入有效的 B站 Cookie (必须包含 SESSDATA 字段)")
+    # 自动从 cookies.json 加载 Cookie
+    cookie = get_cookie_string()
+    if not cookie:
+        print("❌ 未找到有效的 Cookie。")
+        print("   请先运行 python login.py 扫码登录。")
     else:
-        get_user_videos(uid=TARGET_UID, cookie=MY_COOKIE, page_num=PAGE_NUM)
+        logged_in, username, uid = is_logged_in(cookie)
+        if logged_in:
+            print(f"当前登录: {username} (UID: {uid})")
+        else:
+            print("⚠️ Cookie 可能已失效,建议重新运行 python login.py 扫码登录。")
+
+        get_user_videos(uid=TARGET_UID, cookie=cookie, page_num=PAGE_NUM)
