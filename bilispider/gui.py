@@ -504,6 +504,9 @@ class BiliSpiderGUI:
     def _query_user(self) -> None:
         """根据输入的 UID 查询用户信息和视频列表。"""
         uid_text = self._uid_entry.get().strip()
+        # 同步到爬取标签页的 UID 输入框
+        self._crawl_uid_entry.delete(0, tk.END)
+        self._crawl_uid_entry.insert(0, uid_text)
         if not uid_text:
             messagebox.showwarning("提示", "请输入目标用户的 UID")
             return
