@@ -23,6 +23,7 @@ from .login import (
     load_cookies,
     qr_login,
 )
+from .comment_crawler import CommentCrawler
 from .wbi import enc_wbi, get_wbi_keys
 
 # ─── 颜色 / 字体常量 ─────────────────────────────────────────
@@ -52,6 +53,10 @@ class BiliSpiderGUI:
         self._uid: Optional[int] = None
         self._qr_window: Optional[tk.Toplevel] = None
         self._qr_login_active = False
+
+        # 评论爬取状态
+        self._crawler: Optional[CommentCrawler] = None
+        self._crawling = False
 
         # UI 变量
         self._login_status_var = tk.StringVar(value="未登录")
@@ -172,7 +177,183 @@ class BiliSpiderGUI:
         self._video_text.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
         self._notebook.add(self._video_tab, text="  🎬 视频列表  ")
 
+        # 标签页 3: 评论爬取
+        self._crawler_tab = tk.Frame(self._notebook, bg=_COLOR_CARD)
+        self._build_crawler_tab(self._crawler_tab)
+        self._notebook.add(self._crawler_tab, text="  💬 评论爬取  ")
+
         self._notebook.pack(fill=tk.BOTH, expand=True)
+
+    def _build_crawler_tab(self, parent: tk.Frame) -> None:
+        """构建评论爬取标签页的 UI。"""
+        # ── 参数配置区 ──
+        cfg = tk.LabelFrame(parent, text="爬取参数", font=_FONT_HEADING,
+                            bg=_COLOR_CARD, padx=10, pady=8)
+        cfg.pack(fill=tk.X, padx=6, pady=(6, 4))
+
+        row1 = tk.Frame(cfg, bg=_COLOR_CARD)
+        row1.pack(fill=tk.X, pady=2)
+        tk.Label(row1, text="目标UID:", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT)
+        self._crawl_uid_entry = tk.Entry(row1, font=_FONT_BODY, width=18)
+        self._crawl_uid_entry.pack(side=tk.LEFT, padx=6)
+        self._crawl_uid_entry.insert(0, "2")
+
+        tk.Label(row1, text="最近天数:", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT, padx=(16, 0))
+        self._crawl_days_var = tk.StringVar(value="30")
+        tk.Spinbox(row1, textvariable=self._crawl_days_var, from_=1, to=365,
+                   width=5, font=_FONT_BODY).pack(side=tk.LEFT, padx=4)
+
+        tk.Label(row1, text="最大视频:", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT, padx=(16, 0))
+        self._crawl_max_var = tk.StringVar(value="5")
+        tk.Spinbox(row1, textvariable=self._crawl_max_var, from_=1, to=100,
+                   width=5, font=_FONT_BODY).pack(side=tk.LEFT, padx=4)
+
+        row2 = tk.Frame(cfg, bg=_COLOR_CARD)
+        row2.pack(fill=tk.X, pady=2)
+        tk.Label(row2, text="代理:", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT)
+        self._crawl_proxy_entry = tk.Entry(row2, font=_FONT_BODY, width=38)
+        self._crawl_proxy_entry.pack(side=tk.LEFT, padx=6)
+        tk.Label(row2, text="(如 http://127.0.0.1:7890)", font=("Microsoft YaHei", 8),
+                 bg=_COLOR_CARD, fg="#888").pack(side=tk.LEFT)
+
+        # ── 控制按钮 ──
+        btn_row = tk.Frame(cfg, bg=_COLOR_CARD)
+        btn_row.pack(fill=tk.X, pady=(6, 0))
+        self._crawl_start_btn = tk.Button(
+            btn_row, text="▶ 开始爬取", command=self._start_crawl,
+            bg=_COLOR_BILI_PINK, fg="white", font=_FONT_BODY,
+            cursor="hand2", relief=tk.FLAT, padx=16, pady=3,
+        )
+        self._crawl_start_btn.pack(side=tk.LEFT, padx=4)
+        self._crawl_stop_btn = tk.Button(
+            btn_row, text="⏹ 停止", command=self._stop_crawl,
+            bg="#e74c3c", fg="white", font=_FONT_BODY,
+            cursor="hand2", relief=tk.FLAT, padx=16, pady=3,
+            state=tk.DISABLED,
+        )
+        self._crawl_stop_btn.pack(side=tk.LEFT, padx=4)
+
+        self._crawl_stats_var = tk.StringVar(value="就绪")
+        tk.Label(btn_row, textvariable=self._crawl_stats_var,
+                 font=("Microsoft YaHei", 9), bg=_COLOR_CARD, fg="#666").pack(side=tk.RIGHT)
+
+        # ── 日志输出区 ──
+        self._crawl_log = scrolledtext.ScrolledText(
+            parent, font=_FONT_MONO, wrap=tk.WORD,
+            state=tk.DISABLED, bg="#1e1e1e", fg="#d4d4d4",
+            relief=tk.FLAT, insertbackground="white",
+        )
+        self._crawl_log.pack(fill=tk.BOTH, expand=True, padx=6, pady=(4, 6))
+
+    # ─── 评论爬取逻辑 ─────────────────────────────────────────
+
+    def _start_crawl(self) -> None:
+        """启动评论爬取。"""
+        if self._crawling:
+            return
+        uid = self._crawl_uid_entry.get().strip()
+        if not uid.isdigit():
+            messagebox.showwarning("提示", "请输入有效的目标 UID")
+            return
+
+        # 解析参数
+        days = int(self._crawl_days_var.get() or 0)
+        max_videos = int(self._crawl_max_var.get() or 0)
+        proxy = self._crawl_proxy_entry.get().strip()
+        proxies = [proxy] if proxy else []
+
+        # 时间过滤
+        since_ts = 0
+        if days > 0:
+            from datetime import datetime, timedelta
+            since_ts = int((datetime.now() - timedelta(days=days)).timestamp())
+
+        self._crawling = True
+        self._crawl_start_btn.configure(state=tk.DISABLED)
+        self._crawl_stop_btn.configure(state=tk.NORMAL)
+        self._crawl_stats_var.set("正在初始化...")
+        self._crawl_log_clear()
+        self._crawl_log_append(f"=== 开始爬取 UID={uid} ===\n")
+        if days:
+            self._crawl_log_append(f"时间范围: 最近 {days} 天\n")
+        if max_videos:
+            self._crawl_log_append(f"视频限制: 最多 {max_videos} 个\n")
+        if proxy:
+            self._crawl_log_append(f"代理: {proxy}\n")
+        self._crawl_log_append("")
+
+        def _run() -> None:
+            crawler = CommentCrawler()
+            crawler.configure(
+                since_ts=since_ts, until_ts=0,
+                max_videos=max_videos, proxies=proxies,
+            )
+            self._crawler = crawler
+
+            # 重定向 print 到日志窗口
+            import io
+            old_stdout = sys.stdout
+            log_buffer = io.StringIO()
+
+            class _LogWriter:
+                def write(self, s):
+                    log_buffer.write(s)
+                    if s.strip():
+                        self.flush()
+                def flush(self):
+                    text = log_buffer.getvalue()
+                    log_buffer.truncate(0)
+                    log_buffer.seek(0)
+                    if text:
+                        self._root.after(0, lambda t=text: self._crawl_log_append(t))
+            import sys as _sys
+            writer = _LogWriter()
+            writer._root = self.root
+            _sys.stdout = writer
+
+            try:
+                if not crawler.setup():
+                    self.root.after(0, lambda: self._crawl_done("初始化失败: Cookie 无效"))
+                    return
+                result = crawler.crawl_by_uid(uid)
+                self.root.after(0, lambda r=result: self._crawl_done(
+                    f"完成! 一级:{r.get('total_root',0)} 子评论:{r.get('total_subs',0)} 总计:{r.get('db_total',0)}"
+                ))
+            except Exception as e:
+                self.root.after(0, lambda: self._crawl_done(f"出错: {e}"))
+            finally:
+                _sys.stdout = old_stdout
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _stop_crawl(self) -> None:
+        """停止爬取。"""
+        if self._crawler:
+            self._crawler.cancel()
+        self._crawling = False
+        self._crawl_start_btn.configure(state=tk.NORMAL)
+        self._crawl_stop_btn.configure(state=tk.DISABLED)
+        self._crawl_log_append("\n[!] 已发送停止信号,等待当前请求完成...\n")
+
+    def _crawl_done(self, msg: str) -> None:
+        """爬取完成后更新 UI。"""
+        self._crawling = False
+        self._crawl_start_btn.configure(state=tk.NORMAL)
+        self._crawl_stop_btn.configure(state=tk.DISABLED)
+        self._crawl_stats_var.set(msg)
+        self._crawl_log_append(f"\n=== {msg} ===\n")
+        self._set_status("评论爬取 " + msg)
+
+    def _crawl_log_clear(self) -> None:
+        self._crawl_log.configure(state=tk.NORMAL)
+        self._crawl_log.delete("1.0", tk.END)
+        self._crawl_log.configure(state=tk.DISABLED)
+
+    def _crawl_log_append(self, text: str) -> None:
+        self._crawl_log.configure(state=tk.NORMAL)
+        self._crawl_log.insert(tk.END, text)
+        self._crawl_log.see(tk.END)
+        self._crawl_log.configure(state=tk.DISABLED)
 
     def _build_status_bar(self) -> None:
         """底部状态栏。"""
