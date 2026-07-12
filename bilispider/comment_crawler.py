@@ -65,6 +65,107 @@ _RETRY_BASE_DELAY = 5.0    # 重试基础延迟
 _PAUSE_ANTI_FREQ = 30.0    # -799 请求频繁
 _PAUSE_RISK = 90.0         # -412 风控拦截
 
+# ─── 速率控制器 (自适应风控) ─────────────────────────────────────
+
+class RateController:
+    """自适应速率控制器: 监控412事件,动态调整请求延迟。"""
+
+    STATIC_NORMAL = "normal"
+    STATIC_WARNING = "warning"
+    STATIC_COOLING = "cooling"
+    STATIC_RECOVERY = "recovery"
+
+    def __init__(self) -> None:
+        self._state = self.STATIC_NORMAL
+        self._412_events: list[dict] = []  # 最近的412事件
+        self._request_times: list[float] = []  # 最近请求时间
+        self._success_streak = 0            # 连续成功次数
+        self._base_delay = 2.0              # 当前基础延迟
+        self._jitter = 2.0                  # 当前抖动范围
+
+    # ── 公共接口 ──
+
+    def on_request(self) -> float:
+        """每次请求前调用,返回应等待的秒数。"""
+        self._request_times.append(time.time())
+        # 只保留最近5分钟
+        cutoff = time.time() - 300
+        self._request_times = [t for t in self._request_times if t > cutoff]
+        return self._base_delay + random.uniform(0, self._jitter)
+
+    def on_success(self) -> None:
+        """请求成功后调用,累积恢复进度。"""
+        self._success_streak += 1
+        # 连续成功10次 + 当前非NORMAL → 进入恢复模式
+        if self._state != self.STATIC_NORMAL and self._success_streak >= 10:
+            self._enter_recovery()
+
+    def on_412(self, url: str, api_type: str) -> str:
+        """遇到412时调用,返回状态变化描述。"""
+        now = time.time()
+        self._412_events.append({
+            "time": now, "url": url[:80], "api": api_type,
+            "state_before": self._state,
+        })
+        # 只保留最近30分钟
+        self._412_events = [e for e in self._412_events if now - e["time"] < 1800]
+        recent_count = len(self._412_events)
+        self._success_streak = 0
+
+        if recent_count >= 3:
+            return self._enter_cooling(recent_count)
+        elif recent_count == 2:
+            return self._enter_warning(recent_count)
+        else:
+            # 单次412: 仍然触发轻量警告
+            return self._enter_warning(recent_count)
+
+    def get_state(self) -> str:
+        return self._state
+
+    def get_delay_range(self) -> tuple[float, float]:
+        return (self._base_delay, self._base_delay + self._jitter)
+
+    def get_412_count(self) -> int:
+        return len(self._412_events)
+
+    def get_412_log(self) -> list[dict]:
+        return self._412_events[-10:]  # 最近10条
+
+    # ── 状态转换 ──
+
+    def _enter_warning(self, count: int) -> str:
+        self._state = self.STATIC_WARNING
+        self._base_delay = 5.0 + count * 2
+        self._jitter = 5.0
+        msg = f"[RATE] 进入警戒模式 (412x{count}) — 延迟={self._base_delay}s~{self._base_delay+self._jitter}s"
+        print(f"  {msg}")
+        return msg
+
+    def _enter_cooling(self, count: int) -> str:
+        self._state = self.STATIC_COOLING
+        self._base_delay = 30.0 + count * 5
+        self._jitter = 30.0
+        msg = f"[RATE] 进入冷却模式 (412x{count}) — 延迟={self._base_delay}s~{self._base_delay+self._jitter}s"
+        print(f"  {msg}")
+        return msg
+
+    def _enter_recovery(self) -> str:
+        self._state = self.STATIC_RECOVERY
+        # 逐步恢复: 每成功5次降低一次延迟
+        self._base_delay = max(2.0, self._base_delay - 1.0)
+        self._jitter = max(1.0, self._jitter - 1.0)
+        if self._base_delay <= 2.5:
+            self._state = self.STATIC_NORMAL
+            self._base_delay = 2.0
+            self._jitter = 2.0
+            msg = "[RATE] 恢复正常模式"
+        else:
+            msg = f"[RATE] 恢复模式 — 延迟={self._base_delay}s~{self._base_delay+self._jitter}s"
+        print(f"  {msg}")
+        return msg
+
+
 # B站评论分页上限 (实测)
 _MAX_ROOT_PAGES = 200      # 一级评论安全上限 (200页 x 20条 = 4000条,足够)
 _MAX_SUB_PAGES = 10        # 子评论最多翻 10 页 (保守)
@@ -280,6 +381,8 @@ class CommentCrawler:
         self._sub_key = ""
         self._request_count = 0
         self._cancelled = False
+        # 速率控制器
+        self._rate_ctrl = RateController()
         # 时间过滤 (Unix 时间戳,0 表示不过滤)
         self._since_ts: int = 0   # 只爬此时间之后的评论
         self._until_ts: int = 0   # 只爬此时间之前的评论
@@ -376,6 +479,8 @@ class CommentCrawler:
             "Sec-Ch-Ua-Mobile": "?0",
             "Sec-Ch-Ua-Platform": '"Windows"',
         })
+        dmin, dmax = self._rate_ctrl.get_delay_range()
+        print(f"[*] 速率控制: {self._rate_ctrl.get_state()} 模式, 延迟 {dmin:.1f}s~{dmax:.1f}s")
         return True
 
     def _rotate_proxy(self) -> None:
@@ -406,8 +511,8 @@ class CommentCrawler:
                 pass  # 刷新失败,继续用旧 key
 
     def _delay(self, extra: float = 0.0) -> None:
-        """随机延迟,模拟人类行为。"""
-        base = random.uniform(_MIN_DELAY, _MAX_DELAY)
+        """自适应延迟,根据风控状态动态调整。"""
+        base = self._rate_ctrl.on_request()
         time.sleep(base + extra)
 
     def _signed_get(self, url: str, params: dict, referer: str = "https://www.bilibili.com/") -> Optional[dict]:
@@ -431,10 +536,12 @@ class CommentCrawler:
 
             try:
                 resp = self._session.get(url, params=signed, timeout=15)
-                # HTTP 412 = 风控拦截
+                # HTTP 412 = 风控拦截 → 交给速率控制器治理
                 if resp.status_code == 412:
-                    print(f"  [!] HTTP 412 风控拦截,暂停 {_PAUSE_RISK}s...")
-                    time.sleep(_PAUSE_RISK)
+                    api_type = "reply" if "/reply" in url else "search" if "search" in url else "other"
+                    self._rate_ctrl.on_412(url, api_type)
+                    delay = self._rate_ctrl.on_request()
+                    time.sleep(delay)
                     continue
 
                 resp.raise_for_status()
@@ -442,9 +549,11 @@ class CommentCrawler:
                 code = data.get("code", 0)
 
                 if code == 0:
+                    self._rate_ctrl.on_success()
                     return data
                 elif code in (-352,):
                     # -352: 风控校验失败 (签名可能过期)
+                    self._rate_ctrl._success_streak = 0
                     print(f"  [!] API -352 风控校验失败,刷新 WBI 密钥后重试")
                     try:
                         self._img_key, self._sub_key = get_wbi_keys()
