@@ -547,6 +547,10 @@ class CommentCrawler:
                 if resp.status_code == 412:
                     api_type = "reply" if "/reply" in url else "search" if "search" in url else "other"
                     self._rate_ctrl.on_412(url, api_type)
+                    # 冷却模式: 放弃重试, 让上层调用自然降速
+                    if self._rate_ctrl.get_state() == RateController.STATIC_COOLING:
+                        print(f"  [!] 已进入冷却模式,放弃当前请求重试")
+                        return None
                     delay = self._rate_ctrl.on_request()
                     time.sleep(delay)
                     continue
