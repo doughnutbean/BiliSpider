@@ -91,6 +91,12 @@ class BiliSpiderGUI:
             self._crawl_proxy_entry.insert(0, cfg.get("proxy", ""))
             self._search_uid_entry.delete(0, tk.END)
             self._search_uid_entry.insert(0, cfg.get("search_uid", "2"))
+            # 速率控制
+            self._rate_base_var.set(cfg.get("rate_base", "2.0"))
+            self._rate_jitter_var.set(cfg.get("rate_jitter", "2.0"))
+            self._snooze_var.set(cfg.get("snooze", "10"))
+            self._auto_tune_var.set(cfg.get("auto_tune", True))
+            self._auto_snooze_var.set(cfg.get("auto_snooze", True))
         except (FileNotFoundError, json.JSONDecodeError, KeyError):
             pass
 
@@ -103,6 +109,11 @@ class BiliSpiderGUI:
             "crawl_max": self._crawl_max_var.get(),
             "proxy": self._crawl_proxy_entry.get().strip(),
             "search_uid": self._search_uid_entry.get().strip(),
+            "rate_base": self._rate_base_var.get(),
+            "rate_jitter": self._rate_jitter_var.get(),
+            "snooze": self._snooze_var.get(),
+            "auto_tune": self._auto_tune_var.get(),
+            "auto_snooze": self._auto_snooze_var.get(),
         }
         try:
             with open(self._config_path, "w", encoding="utf-8") as f:
