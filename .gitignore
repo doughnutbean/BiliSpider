@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 敏感信息（Cookie 等）- 不要把带真实 Cookie 的文件提交到仓库
+.env
+*cookie*
+!bilispider/cookie*
