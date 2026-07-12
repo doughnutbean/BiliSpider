@@ -398,7 +398,7 @@ class BiliSpiderGUI:
         self._crawl_log.configure(state=tk.DISABLED)
 
     def _search_comments(self) -> None:
-        """检索指定 UID 发布的所有评论 (从本地数据库)。"""
+        """检索指定 UID 发布的所有评论 (弹出表格窗口)。"""
         uid = self._search_uid_entry.get().strip()
         if not uid.isdigit():
             self._search_count_var.set("请输入有效UID")
@@ -414,7 +414,7 @@ class BiliSpiderGUI:
         conn = sqlite3.connect(db_path)
         rows = conn.execute(
             """SELECT rpid,oid,ctime,message,parent
-               FROM comments WHERE mid=? ORDER BY ctime DESC LIMIT 200""",
+               FROM comments WHERE mid=? ORDER BY ctime DESC LIMIT 500""",
             (int(uid),),
         ).fetchall()
         conn.close()
@@ -425,13 +425,101 @@ class BiliSpiderGUI:
             return
 
         self._search_count_var.set(f"找到 {len(rows)} 条")
-        lines = [f"\n--- 检索 UID={uid} 的评论 ({len(rows)}条) ---\n"]
+        self._show_comment_table(uid, rows)
+
+    def _show_comment_table(self, uid: str, rows: list) -> None:
+        """弹出评论检索结果表格窗口。"""
+        import time
+        win = tk.Toplevel(self.root)
+        win.title(f"UID={uid} 的评论 ({len(rows)}条)")
+        win.geometry("860x520")
+        win.configure(bg=_COLOR_CARD)
+
+        # 工具栏
+        toolbar = tk.Frame(win, bg=_COLOR_CARD)
+        toolbar.pack(fill=tk.X, padx=8, pady=(8, 4))
+        tk.Label(toolbar, text=f"共 {len(rows)} 条评论", font=_FONT_HEADING, bg=_COLOR_CARD).pack(side=tk.LEFT)
+        tk.Button(toolbar, text="导出Excel", command=lambda: self._export_to_excel(uid, rows),
+                  bg=_COLOR_BILI_BLUE, fg="white", font=_FONT_BODY,
+                  relief=tk.FLAT, padx=12, pady=2, cursor="hand2").pack(side=tk.RIGHT, padx=4)
+
+        # 表格
+        tree_frame = tk.Frame(win, bg=_COLOR_CARD)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
+
+        columns = ("time", "level", "oid", "rpid", "text")
+        tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
+        tree.heading("time", text="时间")
+        tree.heading("level", text="层级")
+        tree.heading("oid", text="视频oid")
+        tree.heading("rpid", text="rpid")
+        tree.heading("text", text="评论内容")
+        tree.column("time", width=130, anchor="center")
+        tree.column("level", width=50, anchor="center")
+        tree.column("oid", width=120, anchor="center")
+        tree.column("rpid", width=120, anchor="center")
+        tree.column("text", width=400)
+
+        # 滚动条
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(fill=tk.BOTH, expand=True)
+
+        # 填充数据
         for rpid, oid, ctime, msg, parent in rows:
             ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(ctime))
-            level = "[二级]" if parent > 0 else "[一级]"
-            text = str(msg)[:80].replace("\n", " ")
-            lines.append(f"  {ts} {level} oid={oid} rpid={rpid}: {text}")
-        self._crawl_log_append("\n".join(lines) + "\n")
+            level = "二级" if parent > 0 else "一级"
+            text = str(msg)[:100].replace("\n", " ")
+            tree.insert("", tk.END, values=(ts, level, oid, rpid, text))
+
+        # 双击打开B站视频链接
+        def _on_double_click(event):
+            item = tree.selection()
+            if item:
+                oid = tree.item(item[0], "values")[2]
+                import webbrowser
+                webbrowser.open(f"https://www.bilibili.com/video/av{oid}")
+
+        tree.bind("<Double-1>", _on_double_click)
+
+    def _export_to_excel(self, uid: str, rows: list) -> None:
+        """将检索结果导出为 Excel 文件。"""
+        from tkinter import filedialog, messagebox
+        import time, os
+
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel文件", "*.xlsx")],
+            initialfile=f"{uid}_评论数据.xlsx",
+        )
+        if not filepath:
+            return
+
+        try:
+            import openpyxl
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = f"UID={uid}"
+            ws.append(["rpid", "视频oid", "时间", "层级", "评论内容"])
+            for rpid, oid, ctime, msg, parent in rows:
+                ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ctime))
+                level = "二级" if parent > 0 else "一级"
+                ws.append([rpid, oid, ts, level, str(msg)])
+            wb.save(filepath)
+            messagebox.showinfo("导出成功", f"已保存到:\n{filepath}")
+        except ImportError:
+            # 回退到 CSV
+            filepath = filepath.replace(".xlsx", ".csv")
+            import csv
+            with open(filepath, "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["rpid", "视频oid", "时间", "层级", "评论内容"])
+                for rpid, oid, ctime, msg, parent in rows:
+                    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ctime))
+                    level = "二级" if parent > 0 else "一级"
+                    writer.writerow([rpid, oid, ts, level, str(msg)])
+            messagebox.showinfo("导出成功", f"已保存为CSV:\n{filepath}")
 
     def _build_status_bar(self) -> None:
         """底部状态栏。"""
