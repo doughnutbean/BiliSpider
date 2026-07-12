@@ -68,7 +68,6 @@ _PAUSE_RISK = 90.0         # -412 风控拦截
 # B站评论分页上限 (实测)
 _MAX_ROOT_PAGES = 20       # 一级评论最多翻 20 页
 _MAX_SUB_PAGES = 10        # 子评论最多翻 10 页 (保守)
-_MAX_SUB_ROOTS = 30        # 每个视频最多爬多少条根评论的子评论
 _PAGE_SIZE = 20            # 每页条数
 
 # 代理配置 (支持 HTTP/HTTPS 代理轮换)
@@ -658,7 +657,7 @@ class CommentCrawler:
         if not rows:
             return 0
 
-        print(f"    aid={oid} 子评论: {len(rows)} 条根评论有待爬取 (限制最多{_MAX_SUB_ROOTS}条)")
+        print(f"    aid={oid} 子评论: {len(rows)} 条根评论有待爬取")
 
         # 读取子评论爬取进度
         progress = self.db.get_progress(oid, ctype)
@@ -670,17 +669,13 @@ class CommentCrawler:
         crawled = 0
         processed = 0
         for root_rpid, sub_count in rows:
-            if processed >= _MAX_SUB_ROOTS:
-                print(f"    aid={oid} 子评论: 已达到上限 ({_MAX_SUB_ROOTS}条),跳过剩余")
-                break
-
             root_rpid_str = str(root_rpid)
             if root_rpid_str in sub_progress and sub_progress[root_rpid_str] >= sub_count:
                 continue  # 已经爬完
 
             processed += 1
             if processed % 5 == 0 or processed == 1:  # 每5条根评论报告一次
-                print(f"    aid={oid} 子评论: 处理第 {processed}/{min(len(rows),_MAX_SUB_ROOTS)} 条根评论...")
+                print(f"    aid={oid} 子评论: 处理第 {processed}/{len(rows)} 条根评论...")
 
             start_page = (sub_progress.get(root_rpid_str, 0) // _PAGE_SIZE) + 1
 
