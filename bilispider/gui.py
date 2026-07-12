@@ -395,7 +395,11 @@ class BiliSpiderGUI:
 
     def _start_benchmark(self, mode: str) -> None:
         """启动基准测试 (quick/medium/overnight)。"""
-        import benchmark
+        try:
+            import benchmark
+        except ImportError:
+            self._crawl_log_append("[X] 无法导入 benchmark.py,请确认文件在项目根目录\n")
+            return
         PRESETS = benchmark.PRESETS
         BenchmarkRunner = benchmark.BenchmarkRunner
         if mode not in PRESETS:
@@ -412,8 +416,31 @@ class BiliSpiderGUI:
         self._bench_runner = runner
 
         def _run() -> None:
-            report = runner.run()
-            self.root.after(0, lambda: self._bench_done(report))
+            import sys, io
+            old_stdout = sys.stdout
+            log_buffer = io.StringIO()
+            gui_log = self._crawl_log_append
+            gui_root = self.root
+
+            class _BW:
+                def write(self, s):
+                    log_buffer.write(s)
+                    if s.strip():
+                        self.flush()
+                def flush(self):
+                    t = log_buffer.getvalue()
+                    log_buffer.truncate(0); log_buffer.seek(0)
+                    if t:
+                        gui_root.after(0, lambda x=t: gui_log(x))
+            sys.stdout = _BW()
+            try:
+                report = runner.run()
+            except Exception as e:
+                self.root.after(0, lambda: gui_log(f"\n[X] 基准测试异常: {e}\n"))
+                report = {"error": str(e)}
+            finally:
+                sys.stdout = old_stdout
+            self.root.after(0, lambda r=report: self._bench_done(r))
 
         threading.Thread(target=_run, daemon=True).start()
 
