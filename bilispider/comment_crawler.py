@@ -743,6 +743,22 @@ class CommentCrawler:
         except Exception as e:
             print(f"[!] WBI 密钥刷新失败: {e}")
 
+    def _wake_up(self) -> None:
+        """沉睡后唤醒: 刷新WBI密钥、验证Cookie、重设代理。"""
+        print("  [*] 唤醒检查: 刷新WBI密钥...")
+        self._force_refresh_wbi()
+        print("  [*] 唤醒检查: 验证Cookie有效性...")
+        from .login import is_logged_in, get_cookie_string
+        ok, name, _ = is_logged_in(get_cookie_string())
+        if ok:
+            print(f"  [*] Cookie有效: {name}")
+        else:
+            print("  [!] Cookie可能已过期,建议重新登录")
+        print("  [*] 唤醒检查: 轮换代理...")
+        self._rotate_ua()
+        if self._proxies or (hasattr(self, '_proxy_pool') and self._proxy_pool.count() > 0):
+            self._rotate_proxy()
+
     def _delay(self, extra: float = 0.0) -> None:
         """自适应延迟,根据风控状态动态调整。"""
         base = self._rate_ctrl.on_request()
@@ -781,6 +797,7 @@ class CommentCrawler:
                         print(f"  [!] 连续412 — 进入沉睡 {snooze_s/60:.0f} 分钟,自动恢复...")
                         time.sleep(snooze_s)
                         self._rate_ctrl._exit_snooze()
+                        self._wake_up()
                         print(f"  [*] 沉睡结束,恢复爬取")
                         return None
                     delay = self._rate_ctrl.on_request()
