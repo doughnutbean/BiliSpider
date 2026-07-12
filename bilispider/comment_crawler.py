@@ -33,7 +33,17 @@ import time
 from dataclasses import dataclass, field
 from typing import Iterator, Optional
 
-import requests
+import requests as _plain_requests
+
+# 尝试使用 curl_cffi 模拟真实浏览器 TLS 指纹,如果不可用则回退到 requests
+try:
+    from curl_cffi import requests as _curl_requests  # type: ignore
+    _CURL_CFFI_AVAILABLE = True
+    _IMPERSONATE_TARGET = "chrome120"
+except ImportError:
+    _curl_requests = None  # type: ignore
+    _CURL_CFFI_AVAILABLE = False
+    _IMPERSONATE_TARGET = ""
 
 from .login import get_cookie_string
 from .wbi import enc_wbi, get_wbi_keys
@@ -264,7 +274,7 @@ class CommentCrawler:
 
     def __init__(self, db_path: str = _DB_PATH) -> None:
         self.db = CommentDatabase(db_path)
-        self._session = requests.Session()
+        self._session = None  # 在 setup() 中创建
         self._cookie = ""
         self._img_key = ""
         self._sub_key = ""
@@ -277,6 +287,8 @@ class CommentCrawler:
         # 代理轮换
         self._proxy_index: int = 0
         self._proxies: list[str] = []
+        # TLS 伪装
+        self._tls_engine: str = ""  # "curl_cffi" 或 "requests"
 
     # ── 初始化 ──
 
@@ -310,21 +322,42 @@ class CommentCrawler:
         return True
 
     def setup(self) -> bool:
-        """初始化: 加载 Cookie + 获取 WBI 密钥。"""
+        """初始化: 创建 TLS 伪装会话 + 加载 Cookie + 获取 WBI 密钥。"""
         self._cookie = get_cookie_string()
         if not self._cookie:
             print("[X] 未找到 Cookie,请先运行 python login.py 扫码登录")
             return False
+
+        # ── 创建会话: 优先 curl_cffi (Chrome 120 TLS 指纹), 回退 plain requests ──
+        if _CURL_CFFI_AVAILABLE:
+            self._session = _curl_requests.Session(impersonate=_IMPERSONATE_TARGET)
+            self._tls_engine = "curl_cffi"
+            print(f"[*] TLS 伪装已启用: curl_cffi impersonate={_IMPERSONATE_TARGET}")
+        else:
+            self._session = _plain_requests.Session()
+            self._tls_engine = "requests"
+            print("[!] curl_cffi 未安装,使用普通 requests (TLS 指纹可能被识别)")
+
+        # ── 自动检测 flclash 代理 ──
+        if not self._proxies:
+            auto_proxy = "http://127.0.0.1:7890"
+            try:
+                test = _plain_requests.get("http://127.0.0.1:7890", timeout=1)
+            except Exception:
+                pass  # 代理不可用
+            else:
+                self._proxies = [auto_proxy]
+                print(f"[*] 自动检测到代理: {auto_proxy}")
+
+        # ── 配置代理 ──
+        if self._proxies:
+            self._rotate_proxy()
 
         try:
             self._img_key, self._sub_key = get_wbi_keys()
         except Exception as e:
             print(f"[X] 获取 WBI 密钥失败: {e}")
             return False
-
-        # 配置代理
-        if self._proxies:
-            self._rotate_proxy()
 
         self._session.headers.update({
             "User-Agent": random.choice(_UA_POOL),
@@ -333,6 +366,9 @@ class CommentCrawler:
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Accept-Encoding": "gzip, deflate, br",
             "Origin": "https://www.bilibili.com",
+            "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
         })
         return True
 
@@ -421,11 +457,13 @@ class CommentCrawler:
                     print(f"  [!] API 错误 code={code}: {data.get('message', '')}")
                     time.sleep(_RETRY_BASE_DELAY * (attempt + 1))
 
-            except requests.exceptions.Timeout:
-                print(f"  [!] 请求超时,第 {attempt + 1} 次重试")
-                time.sleep(_RETRY_BASE_DELAY * (attempt + 1))
-            except requests.exceptions.RequestException as e:
-                print(f"  [!] 网络异常: {e},第 {attempt + 1} 次重试")
+            except Exception as e:
+                # curl_cffi 和 requests 的异常类型不同,统一捕获
+                err_msg = str(e).lower()
+                if "timeout" in err_msg:
+                    print(f"  [!] 请求超时,第 {attempt + 1} 次重试")
+                else:
+                    print(f"  [!] 网络异常: {e},第 {attempt + 1} 次重试")
                 time.sleep(_RETRY_BASE_DELAY * (attempt + 1))
 
         print(f"  [X] 请求失败,已达最大重试次数 ({_MAX_RETRIES})")
