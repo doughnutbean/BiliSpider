@@ -11,7 +11,9 @@ bilispider/
 ├── bilispider/
 │   ├── __init__.py      # 包初始化
 │   ├── login.py         # 扫码登录 + Cookie 持久化模块
-│   └── wbi.py           # WBI 签名鉴权核心模块
+│   ├── wbi.py           # WBI 签名鉴权核心模块
+│   └── gui.py           # Tkinter 图形化界面
+├── gui.py               # GUI 启动入口
 ├── login.py             # 扫码登录入口脚本
 ├── get_my_info.py       # 获取当前登录用户个人信息（无需签名）
 ├── get_user_info.py     # 获取指定用户主页信息（需 WBI 签名）
@@ -71,6 +73,18 @@ python get_user_videos.py
 ```
 
 修改脚本中的 `TARGET_UID`（目标用户 UID）和 `PAGE_NUM`（页码）后运行。
+
+### 4. 图形化界面（推荐）
+
+```bash
+python gui.py
+```
+
+提供直观的图形化操作界面，支持：
+
+- **扫码登录** — 点击按钮弹出二维码窗口，App 扫码后自动登录
+- **UID 查询** — 输入任意用户 UID，一键查询主页信息和视频列表
+- **双标签展示** — 用户信息 / 视频列表分页展示，清晰直观
 
 ## WBI 签名机制说明
 
