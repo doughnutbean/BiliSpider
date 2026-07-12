@@ -446,20 +446,24 @@ class CommentCrawler:
             self._tls_engine = "requests"
             print("[!] curl_cffi 未安装,使用普通 requests (TLS 指纹可能被识别)")
 
-        # ── 自动检测 flclash 代理 (快速检测,0.3s超时避免卡顿) ──
-        if not self._proxies:
-            auto_proxy = "http://127.0.0.1:7890"
-            try:
-                _plain_requests.get("http://127.0.0.1:7890", timeout=0.3)
-            except Exception:
-                print("[*] 未检测到本地代理,直连")
-            else:
-                self._proxies = [auto_proxy]
-                print(f"[*] 自动检测到代理: {auto_proxy}")
+        # ── 代理池: 优先 ProxyPool, 其次手动配置, 最后 flclash 自动检测 ──
+        from .proxy_pool import get_pool
+        self._proxy_pool = get_pool()
 
-        # ── 配置代理 ──
+        # 自动检测 flclash (如果池中还没有代理)
+        if self._proxy_pool.count() == 0 and not self._proxies:
+            self._proxy_pool.auto_detect_flclash()
+
+        # 把手动配置的代理也加入池
         if self._proxies:
+            self._proxy_pool.add_manuals(self._proxies)
+
+        pool_count = self._proxy_pool.count()
+        if pool_count > 0:
+            print(f"[*] 代理池就绪: {pool_count} 个代理")
             self._rotate_proxy()
+        else:
+            print("[*] 无可用代理,直连")
 
         print("[*] 获取 WBI 签名密钥...")
         try:
@@ -484,12 +488,15 @@ class CommentCrawler:
         return True
 
     def _rotate_proxy(self) -> None:
-        """轮换到下一个代理。"""
-        if not self._proxies:
-            return
-        proxy = self._proxies[self._proxy_index % len(self._proxies)]
-        self._proxy_index += 1
-        self._session.proxies = {"http": proxy, "https": proxy}
+        """轮换到下一个代理 (优先从 ProxyPool 获取)。"""
+        proxy = None
+        if hasattr(self, '_proxy_pool') and self._proxy_pool.count() > 0:
+            proxy = self._proxy_pool.get_proxy()
+        elif self._proxies:
+            proxy = self._proxies[self._proxy_index % len(self._proxies)]
+            self._proxy_index += 1
+        if proxy:
+            self._session.proxies = {"http": proxy, "https": proxy}
 
     def _rotate_ua(self) -> None:
         """随机更换 User-Agent。"""
