@@ -813,7 +813,12 @@ class CommentCrawler:
                         self._rate_ctrl._enter_snooze()
                         snooze_s = self._rate_ctrl._snooze_duration
                         print(f"  [!] 连续412 — 进入沉睡 {snooze_s/60:.0f} 分钟,自动恢复...")
-                        time.sleep(snooze_s)
+                        # 分段沉睡,每秒检查取消信号
+                        for _ in range(int(snooze_s)):
+                            if self._cancelled:
+                                print("  [!] 沉睡中收到停止信号,终止")
+                                return None
+                            time.sleep(1)
                         self._rate_ctrl._exit_snooze()
                         self._wake_up()
                         print(f"  [*] 沉睡结束,恢复爬取")
