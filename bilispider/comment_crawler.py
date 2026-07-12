@@ -66,7 +66,7 @@ _PAUSE_ANTI_FREQ = 30.0    # -799 请求频繁
 _PAUSE_RISK = 90.0         # -412 风控拦截
 
 # B站评论分页上限 (实测)
-_MAX_ROOT_PAGES = 20       # 一级评论最多翻 20 页
+_MAX_ROOT_PAGES = 200      # 一级评论安全上限 (200页 x 20条 = 4000条,足够)
 _MAX_SUB_PAGES = 10        # 子评论最多翻 10 页 (保守)
 _PAGE_SIZE = 20            # 每页条数
 
