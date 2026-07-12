@@ -657,8 +657,6 @@ class CommentCrawler:
         if not rows:
             return 0
 
-        print(f"    aid={oid} 子评论: {len(rows)} 条根评论有待爬取")
-
         # 读取子评论爬取进度
         progress = self.db.get_progress(oid, ctype)
         try:
@@ -666,16 +664,29 @@ class CommentCrawler:
         except (json.JSONDecodeError, TypeError):
             sub_progress = {}
 
-        crawled = 0
-        processed = 0
+        # 统计已完成的根评论数
+        already_done = sum(
+            1 for rpid, sc in rows
+            if str(rpid) in sub_progress and sub_progress[str(rpid)] >= sc
+        )
+        pending = len(rows) - already_done
+
+        if pending == 0:
+            print(f"    aid={oid} 子评论: {len(rows)} 条根评论均已爬完,跳过")
+            return 0
+
+        print(f"    aid={oid} 子评论: 共{len(rows)}条,已爬{already_done}条,待爬{pending}条")
+
+        root_processed = 0
+        total_crawled = 0
         for root_rpid, sub_count in rows:
             root_rpid_str = str(root_rpid)
             if root_rpid_str in sub_progress and sub_progress[root_rpid_str] >= sub_count:
                 continue  # 已经爬完
 
-            processed += 1
-            if processed % 5 == 0 or processed == 1:  # 每5条根评论报告一次
-                print(f"    aid={oid} 子评论: 处理第 {processed}/{len(rows)} 条根评论...")
+            root_processed += 1
+            if root_processed % 5 == 0 or root_processed == 1:
+                print(f"    aid={oid} 子评论: 处理第 {root_processed}/{pending} 条根评论...")
 
             start_page = (sub_progress.get(root_rpid_str, 0) // _PAGE_SIZE) + 1
 
@@ -728,7 +739,7 @@ class CommentCrawler:
                     break
 
                 self.db.insert_comments_batch(records)
-                crawled += len(records)
+                total_crawled += len(records)
 
                 sub_progress[root_rpid_str] = page_num * _PAGE_SIZE
                 self.db.upsert_progress(oid, ctype, sub_progress=json.dumps(sub_progress))
@@ -749,9 +760,9 @@ class CommentCrawler:
         ).fetchone()[0]
         self.db.upsert_progress(oid, ctype, total_subs=total_subs)
 
-        if crawled:
-            print(f"    aid={oid} 子评论: 完成,共爬取 {crawled} 条")
-        return crawled
+        if total_crawled:
+            print(f"    aid={oid} 子评论: 完成,新增 {total_crawled} 条子评论")
+        return total_crawled
 
     # ── 主流程: 按 UID 爬取全部评论 ──
 
