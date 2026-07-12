@@ -57,8 +57,7 @@ _DB_PATH = os.path.join(_PROJECT_ROOT, "comments.db")
 # 请求频率控制 (秒)
 _MIN_DELAY = 2.0          # 最小间隔
 _MAX_DELAY = 4.0          # 最大间隔
-_WBI_REFRESH_INTERVAL = 10  # 每N次请求刷新 WBI 密钥 (基于请求计数)
-_WBI_REFRESH_TTL = 6 * 3600     # WBI 密钥缓存有效期: 6小时 (基于时间)
+_WBI_REFRESH_TTL = 6 * 3600     # WBI 密钥缓存有效期: 6小时
 _WBI_SIGN_FAIL_COOLING = 15.0   # 签名失败后短暂冷却时间(秒)
 _MAX_RETRIES = 3           # 每个请求最大重试次数
 _RETRY_BASE_DELAY = 5.0    # 重试基础延迟
@@ -477,7 +476,6 @@ class CommentCrawler:
         self._cookie = ""
         self._img_key = ""
         self._sub_key = ""
-        self._request_count = 0
         self._wbi_ts = 0.0
         self._cancelled = False
         # 速率控制器
@@ -609,20 +607,15 @@ class CommentCrawler:
 
     def _maybe_refresh_wbi(self) -> None:
         """
-        WBI 密钥刷新策略 (双保险):
-          - 正常状态: 每 10 次请求 OR 每 6 小时自动刷新
+        WBI 密钥刷新策略:
+          - 正常状态: 每 6 小时自动刷新 (时间缓存)
           - 异常状态: -352 时由 _signed_get 调用 _force_refresh_wbi()
         """
-        self._request_count += 1
         now = time.time()
         if not self._wbi_ts:
             self._wbi_ts = now
-
-        need_refresh = (
-            self._request_count % _WBI_REFRESH_INTERVAL == 0
-            or (now - self._wbi_ts) > _WBI_REFRESH_TTL
-        )
-        if need_refresh:
+            return
+        if (now - self._wbi_ts) > _WBI_REFRESH_TTL:
             self._force_refresh_wbi()
 
     def _force_refresh_wbi(self) -> None:
@@ -630,7 +623,6 @@ class CommentCrawler:
         try:
             self._img_key, self._sub_key = get_wbi_keys()
             self._wbi_ts = time.time()
-            self._request_count = 0
             print("[*] WBI 密钥已刷新")
         except Exception as e:
             print(f"[!] WBI 密钥刷新失败: {e}")
