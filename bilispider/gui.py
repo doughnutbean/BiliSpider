@@ -115,6 +115,63 @@ class BiliSpiderGUI:
         self._save_config()
         self.root.destroy()
 
+    # ─── 待爬队列 ───────────────────────────────────────────────
+
+    @property
+    def _queue_path(self) -> str:
+        return os.path.join(os.path.dirname(self._config_path), "crawl_queue.json")
+
+    def _load_queue(self) -> list[str]:
+        try:
+            with open(self._queue_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
+        except (FileNotFoundError, json.JSONDecodeError):
+            return []
+
+    def _save_queue(self, uids: list[str]) -> None:
+        with open(self._queue_path, "w", encoding="utf-8") as f:
+            json.dump(uids, f, ensure_ascii=False)
+
+    def _add_to_queue(self) -> None:
+        """将当前UID添加到待爬队列。"""
+        uid = self._crawl_uid_entry.get().strip()
+        if not uid.isdigit():
+            return
+        queue = self._load_queue()
+        if uid in queue:
+            self._set_status(f"UID {uid} 已在队列中")
+            return
+        queue.append(uid)
+        self._save_queue(queue)
+        self._refresh_queue_display()
+        self._set_status(f"UID {uid} 已加入待爬队列")
+
+    def _clear_queue(self) -> None:
+        self._save_queue([])
+        self._refresh_queue_display()
+        self._set_status("待爬队列已清空")
+
+    def _pop_next_uid(self) -> str | None:
+        """从队列取下一个UID (不移除,最后由爬取完成时移除)。"""
+        queue = self._load_queue()
+        return queue[0] if queue else None
+
+    def _remove_current_from_queue(self, uid: str) -> None:
+        """爬取完成后将当前UID从队列移除。"""
+        queue = self._load_queue()
+        if uid in queue:
+            queue.remove(uid)
+            self._save_queue(queue)
+        self._refresh_queue_display()
+
+    def _refresh_queue_display(self) -> None:
+        queue = self._load_queue()
+        if queue:
+            self._queue_var.set(f"队列({len(queue)}): {' → '.join(queue[:8])}" + ("..." if len(queue) > 8 else ""))
+        else:
+            self._queue_var.set("队列: (空)")
+
     # ─── UI 构建 ───────────────────────────────────────────────
 
     def _build_ui(self) -> None:
@@ -248,6 +305,10 @@ class BiliSpiderGUI:
         self._crawl_uid_entry.pack(side=tk.LEFT, padx=6)
         self._crawl_uid_entry.insert(0, "2")
 
+        tk.Button(row1, text="+队列", command=self._add_to_queue,
+                  bg="#8a8a8a", fg="white", font=("Microsoft YaHei", 8),
+                  cursor="hand2", relief=tk.FLAT, padx=6, pady=1).pack(side=tk.LEFT, padx=4)
+
         tk.Label(row1, text="最近天数:", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT, padx=(16, 0))
         self._crawl_days_var = tk.StringVar(value="30")
         tk.Spinbox(row1, textvariable=self._crawl_days_var, from_=0, to=365,
@@ -269,6 +330,17 @@ class BiliSpiderGUI:
         self._crawl_proxy_entry.pack(side=tk.LEFT, padx=6)
         tk.Label(row2, text="(留空=flclash自动检测 / haipproxy池)", font=("Microsoft YaHei", 8),
                  bg=_COLOR_CARD, fg="#888").pack(side=tk.LEFT)
+
+        # 待爬队列
+        queue_row = tk.Frame(cfg, bg=_COLOR_CARD)
+        queue_row.pack(fill=tk.X, pady=(4, 0))
+        self._queue_var = tk.StringVar(value="队列: (空)")
+        tk.Label(queue_row, textvariable=self._queue_var, font=("Microsoft YaHei", 8),
+                 bg=_COLOR_CARD, fg=_COLOR_BILI_BLUE).pack(side=tk.LEFT)
+        tk.Button(queue_row, text="清空", command=self._clear_queue,
+                  font=("Microsoft YaHei", 7), relief=tk.FLAT, padx=4, pady=0,
+                  cursor="hand2").pack(side=tk.RIGHT)
+        self._refresh_queue_display()
 
         # ── 控制按钮 ──
         btn_row = tk.Frame(cfg, bg=_COLOR_CARD)
@@ -403,6 +475,8 @@ class BiliSpiderGUI:
             since_ts = int((datetime.now() - timedelta(days=days)).timestamp())
 
         self._crawling = True
+        self._current_crawl_uid = uid
+        self._queue_continue = True
         self._crawl_start_btn.configure(state=tk.DISABLED)
         self._crawl_stop_btn.configure(state=tk.NORMAL)
         self._crawl_stats_var.set("正在初始化...")
@@ -482,6 +556,7 @@ class BiliSpiderGUI:
         if self._crawler:
             self._crawler.cancel()
         self._crawling = False
+        self._queue_continue = False  # 阻止队列自动继续
         self._crawl_start_btn.configure(state=tk.NORMAL)
         self._crawl_stop_btn.configure(state=tk.DISABLED)
         self._crawl_log_append("\n[!] 已发送停止信号,等待当前请求完成...\n")
@@ -614,6 +689,8 @@ class BiliSpiderGUI:
         self._crawl_progress["value"] = self._crawl_progress["maximum"]
         self._crawl_log_append(f"\n=== {msg} ===\n")
         self._set_status("评论爬取 " + msg)
+        # 检查待爬队列
+        self._try_queue_next()
 
     def _crawl_log_clear(self) -> None:
         self._crawl_log.configure(state=tk.NORMAL)
@@ -625,6 +702,20 @@ class BiliSpiderGUI:
         self._crawl_log.insert(tk.END, text)
         self._crawl_log.see(tk.END)
         self._crawl_log.configure(state=tk.DISABLED)
+
+    def _try_queue_next(self) -> None:
+        """爬取完成后检查待爬队列,若有下一条则自动启动。"""
+        if not getattr(self, "_queue_continue", False):
+            return
+        current = getattr(self, "_current_crawl_uid", None)
+        if current:
+            self._remove_current_from_queue(current)
+        next_uid = self._pop_next_uid()
+        if next_uid:
+            self._crawl_log_append(f"\n=== 队列中还有 UID={next_uid}, 自动继续... ===\n")
+            self._crawl_uid_entry.delete(0, tk.END)
+            self._crawl_uid_entry.insert(0, next_uid)
+            self.root.after(1000, self._start_crawl)  # 1秒后自动启动
 
     def _search_comments(self) -> None:
         """双源检索: 本地DB + 在线API 融合查询。"""
