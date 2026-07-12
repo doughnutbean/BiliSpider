@@ -289,6 +289,8 @@ class CommentCrawler:
         self._proxies: list[str] = []
         # TLS 伪装
         self._tls_engine: str = ""  # "curl_cffi" 或 "requests"
+        # 进度回调
+        self._progress_cb = None
 
     # ── 初始化 ──
 
@@ -298,6 +300,7 @@ class CommentCrawler:
         until_ts: int = 0,
         max_videos: int = 0,
         proxies: list[str] | None = None,
+        progress_callback=None,
     ) -> None:
         """
         配置爬取参数 (需在 setup() 之前调用)。
@@ -307,11 +310,13 @@ class CommentCrawler:
             until_ts: 只爬取此 Unix 时间戳之前的评论 (0=不限)
             max_videos: 最多爬取视频数 (0=不限)
             proxies: 代理地址列表,如 ["http://127.0.0.1:7890"] (空=直连)
+            progress_callback: 进度回调 fn(current, total, label)
         """
         self._since_ts = since_ts
         self._until_ts = until_ts
         self._max_videos = max_videos
         self._proxies = proxies or []
+        self._progress_cb = progress_callback
 
     def _is_comment_in_range(self, ctime: int) -> bool:
         """检查评论时间是否在设定的范围内。"""
@@ -338,13 +343,13 @@ class CommentCrawler:
             self._tls_engine = "requests"
             print("[!] curl_cffi 未安装,使用普通 requests (TLS 指纹可能被识别)")
 
-        # ── 自动检测 flclash 代理 ──
+        # ── 自动检测 flclash 代理 (快速检测,0.3s超时避免卡顿) ──
         if not self._proxies:
             auto_proxy = "http://127.0.0.1:7890"
             try:
-                test = _plain_requests.get("http://127.0.0.1:7890", timeout=1)
+                _plain_requests.get("http://127.0.0.1:7890", timeout=0.3)
             except Exception:
-                pass  # 代理不可用
+                print("[*] 未检测到本地代理,直连")
             else:
                 self._proxies = [auto_proxy]
                 print(f"[*] 自动检测到代理: {auto_proxy}")
@@ -353,6 +358,7 @@ class CommentCrawler:
         if self._proxies:
             self._rotate_proxy()
 
+        print("[*] 获取 WBI 签名密钥...")
         try:
             self._img_key, self._sub_key = get_wbi_keys()
         except Exception as e:
@@ -774,6 +780,11 @@ class CommentCrawler:
                 if self._max_videos > 0 and idx > self._max_videos:
                     print(f"  [!] 已达到最大视频数限制 ({self._max_videos}),停止")
                     break
+
+                # 进度回调
+                if self._progress_cb:
+                    total = min(len(videos), self._max_videos) if self._max_videos else len(videos)
+                    self._progress_cb(idx, total, v['title'][:30])
 
                 aid = v["aid"]
                 print(f"\n[2/3] 视频 {idx}/{len(videos)}: {v['title'][:40]} (aid={aid})")

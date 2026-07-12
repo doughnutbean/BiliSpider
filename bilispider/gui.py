@@ -237,6 +237,19 @@ class BiliSpiderGUI:
         tk.Label(btn_row, textvariable=self._crawl_stats_var,
                  font=("Microsoft YaHei", 9), bg=_COLOR_CARD, fg="#666").pack(side=tk.RIGHT)
 
+        # ── 进度条 ──
+        progress_row = tk.Frame(cfg, bg=_COLOR_CARD)
+        progress_row.pack(fill=tk.X, pady=(4, 0))
+        self._crawl_progress = ttk.Progressbar(
+            progress_row, mode="determinate", length=400,
+        )
+        self._crawl_progress.pack(fill=tk.X, side=tk.LEFT, expand=True)
+        self._crawl_progress_label = tk.Label(
+            progress_row, text="", font=("Microsoft YaHei", 8),
+            bg=_COLOR_CARD, fg="#888", width=20, anchor=tk.W,
+        )
+        self._crawl_progress_label.pack(side=tk.RIGHT, padx=(6, 0))
+
         # ── 日志输出区 ──
         self._crawl_log = scrolledtext.ScrolledText(
             parent, font=_FONT_MONO, wrap=tk.WORD,
@@ -272,6 +285,8 @@ class BiliSpiderGUI:
         self._crawl_start_btn.configure(state=tk.DISABLED)
         self._crawl_stop_btn.configure(state=tk.NORMAL)
         self._crawl_stats_var.set("正在初始化...")
+        self._crawl_progress["value"] = 0
+        self._crawl_progress_label.configure(text="")
         self._crawl_log_clear()
         self._crawl_log_append(f"=== 开始爬取 UID={uid} ===\n")
         if days:
@@ -283,10 +298,15 @@ class BiliSpiderGUI:
         self._crawl_log_append("")
 
         def _run() -> None:
+            # 进度回调: 当前视频号 / 总数 / 标题
+            def _on_progress(current: int, total: int, label: str):
+                self.root.after(0, lambda: self._update_crawl_progress(current, total, label))
+
             crawler = CommentCrawler()
             crawler.configure(
                 since_ts=since_ts, until_ts=0,
                 max_videos=max_videos, proxies=proxies,
+                progress_callback=_on_progress,
             )
             self._crawler = crawler
 
@@ -335,12 +355,19 @@ class BiliSpiderGUI:
         self._crawl_stop_btn.configure(state=tk.DISABLED)
         self._crawl_log_append("\n[!] 已发送停止信号,等待当前请求完成...\n")
 
+    def _update_crawl_progress(self, current: int, total: int, label: str):
+        """更新进度条和标签。"""
+        self._crawl_progress["maximum"] = total
+        self._crawl_progress["value"] = current
+        self._crawl_progress_label.configure(text=f"视频 {current}/{total}: {label}")
+
     def _crawl_done(self, msg: str) -> None:
         """爬取完成后更新 UI。"""
         self._crawling = False
         self._crawl_start_btn.configure(state=tk.NORMAL)
         self._crawl_stop_btn.configure(state=tk.DISABLED)
         self._crawl_stats_var.set(msg)
+        self._crawl_progress["value"] = self._crawl_progress["maximum"]
         self._crawl_log_append(f"\n=== {msg} ===\n")
         self._set_status("评论爬取 " + msg)
 
