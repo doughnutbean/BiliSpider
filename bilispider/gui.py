@@ -323,6 +323,40 @@ class BiliSpiderGUI:
         )
         self._crawl_progress_label.pack(side=tk.RIGHT, padx=(6, 0))
 
+        # ── 速率控制面板 ──
+        rate_cfg = tk.LabelFrame(cfg, text="速率控制", font=_FONT_HEADING,
+                                 bg=_COLOR_CARD, padx=8, pady=6)
+        rate_cfg.pack(fill=tk.X, pady=(6, 2))
+
+        row_r1 = tk.Frame(rate_cfg, bg=_COLOR_CARD)
+        row_r1.pack(fill=tk.X)
+        tk.Label(row_r1, text="基础延迟(s):", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT)
+        self._rate_base_var = tk.StringVar(value="2.0")
+        tk.Spinbox(row_r1, textvariable=self._rate_base_var, from_=0.5, to=60, increment=0.5,
+                   width=5, font=_FONT_BODY).pack(side=tk.LEFT, padx=4)
+        tk.Label(row_r1, text="抖动(s):", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT, padx=(12, 0))
+        self._rate_jitter_var = tk.StringVar(value="2.0")
+        tk.Spinbox(row_r1, textvariable=self._rate_jitter_var, from_=0.3, to=30, increment=0.3,
+                   width=5, font=_FONT_BODY).pack(side=tk.LEFT, padx=4)
+
+        tk.Label(row_r1, text="沉睡(min):", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT, padx=(12, 0))
+        self._snooze_var = tk.StringVar(value="10")
+        tk.Spinbox(row_r1, textvariable=self._snooze_var, from_=1, to=120, increment=1,
+                   width=5, font=_FONT_BODY).pack(side=tk.LEFT, padx=4)
+
+        row_r2 = tk.Frame(rate_cfg, bg=_COLOR_CARD)
+        row_r2.pack(fill=tk.X, pady=(4, 0))
+        self._auto_tune_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(row_r2, text="自适应提速", variable=self._auto_tune_var,
+                       bg=_COLOR_CARD, font=_FONT_BODY).pack(side=tk.LEFT, padx=2)
+        self._auto_snooze_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(row_r2, text="自适应沉睡", variable=self._auto_snooze_var,
+                       bg=_COLOR_CARD, font=_FONT_BODY).pack(side=tk.LEFT, padx=2)
+
+        self._rate_live_var = tk.StringVar(value="状态: --")
+        tk.Label(row_r2, textvariable=self._rate_live_var,
+                 font=("Microsoft YaHei", 8), bg=_COLOR_CARD, fg="#888").pack(side=tk.RIGHT, padx=6)
+
         # ── 评论检索 ──
         search_row = tk.Frame(parent, bg=_COLOR_CARD)
         search_row.pack(fill=tk.X, padx=6, pady=(6, 0))
@@ -390,10 +424,20 @@ class BiliSpiderGUI:
                 self.root.after(0, lambda: self._update_crawl_progress(current, total, label))
 
             crawler = CommentCrawler()
+            # 读取速率控制参数
+            rate_base = float(self._rate_base_var.get() or 2.0)
+            rate_jitter = float(self._rate_jitter_var.get() or 2.0)
+            snooze_min = int(self._snooze_var.get() or 10)
+            auto_tune = self._auto_tune_var.get()
+            auto_snooze = self._auto_snooze_var.get()
+
             crawler.configure(
                 since_ts=since_ts, until_ts=0,
                 max_videos=max_videos, proxies=proxies,
                 progress_callback=_on_progress,
+                rate_base=rate_base, rate_jitter=rate_jitter,
+                snooze_minutes=snooze_min,
+                auto_tune=auto_tune, auto_snooze=auto_snooze,
             )
             self._crawler = crawler
 
@@ -495,6 +539,30 @@ class BiliSpiderGUI:
 
         # 启动实时指标轮询
         self._poll_bench_metrics()
+        # 开始速率状态轮询
+        if not self._crawling:
+            self._poll_rate_status()
+
+    def _poll_rate_status(self) -> None:
+        """定时刷新速率控制状态显示。"""
+        if not self._crawling:
+            return
+        crawler = self._crawler
+        if crawler and hasattr(crawler, '_rate_ctrl'):
+            rc = crawler._rate_ctrl
+            state = rc.get_state()
+            dmin, dmax = rc.get_delay_range()
+            total_req = rc._total_requests
+            req_rate = rc._compute_current_rate() if hasattr(rc, '_compute_current_rate') else 0
+            snooze_info = ""
+            if hasattr(rc, '_snooze_locked') and rc._snooze_locked:
+                snooze_info = f" 沉睡锁{rc._global_snooze_duration/60:.0f}min"
+            elif hasattr(rc, '_snooze_duration'):
+                snooze_info = f" 沉睡{rc._snooze_duration/60:.0f}min"
+            self._rate_live_var.set(
+                f"状态:{state} | {dmin:.1f}~{dmax:.1f}s | {req_rate:.0f}rpm | {total_req}请求{snooze_info}"
+            )
+        self.root.after(5000, self._poll_rate_status)  # 每5秒刷新
 
     def _poll_bench_metrics(self) -> None:
         """定时轮询基准测试实时指标。"""
@@ -542,6 +610,7 @@ class BiliSpiderGUI:
         self._crawl_start_btn.configure(state=tk.NORMAL)
         self._crawl_stop_btn.configure(state=tk.DISABLED)
         self._crawl_stats_var.set(msg)
+        self._rate_live_var.set("状态: 已停止")
         self._crawl_progress["value"] = self._crawl_progress["maximum"]
         self._crawl_log_append(f"\n=== {msg} ===\n")
         self._set_status("评论爬取 " + msg)

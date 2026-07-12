@@ -617,6 +617,11 @@ class CommentCrawler:
         max_videos: int = 0,
         proxies: list[str] | None = None,
         progress_callback=None,
+        rate_base: float = 2.0,
+        rate_jitter: float = 2.0,
+        snooze_minutes: int = 10,
+        auto_tune: bool = True,
+        auto_snooze: bool = True,
     ) -> None:
         """
         配置爬取参数 (需在 setup() 之前调用)。
@@ -633,6 +638,11 @@ class CommentCrawler:
         self._max_videos = max_videos
         self._proxies = proxies or []
         self._progress_cb = progress_callback
+        self._cfg_rate_base = rate_base
+        self._cfg_rate_jitter = rate_jitter
+        self._cfg_snooze_min = snooze_minutes
+        self._cfg_auto_tune = auto_tune
+        self._cfg_auto_snooze = auto_snooze
 
     def _is_comment_in_range(self, ctime: int) -> bool:
         """检查评论时间是否在设定的范围内。"""
@@ -697,7 +707,13 @@ class CommentCrawler:
             "Sec-Ch-Ua-Platform": '"Windows"',
         })
         dmin, dmax = self._rate_ctrl.get_delay_range()
-        print(f"[*] 速率控制: {self._rate_ctrl.get_state()} 模式, 延迟 {dmin:.1f}s~{dmax:.1f}s")
+        # 应用用户配置的速率参数
+        self._rate_ctrl._base_delay = self._cfg_rate_base
+        self._rate_ctrl._jitter = self._cfg_rate_jitter
+        self._rate_ctrl._snooze_duration = self._cfg_snooze_min * 60
+        self._rate_ctrl._auto_tune_enabled = self._cfg_auto_tune
+        dmin, dmax = self._rate_ctrl.get_delay_range()
+        print(f"[*] 速率控制: {self._rate_ctrl.get_state()} 模式, 延迟 {dmin:.1f}s~{dmax:.1f}s, 沉睡 {self._cfg_snooze_min}min, 自动提速={'ON' if self._cfg_auto_tune else 'OFF'}")
         return True
 
     def _rotate_proxy(self) -> None:
