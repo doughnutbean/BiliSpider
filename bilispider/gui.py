@@ -398,48 +398,98 @@ class BiliSpiderGUI:
         self._crawl_log.configure(state=tk.DISABLED)
 
     def _search_comments(self) -> None:
-        """检索指定 UID 发布的所有评论 (弹出表格窗口)。"""
+        """双源检索: 本地DB + 在线API 融合查询。"""
         uid = self._search_uid_entry.get().strip()
         if not uid.isdigit():
             self._search_count_var.set("请输入有效UID")
             return
 
-        import os, sqlite3, time
+        self._search_count_var.set("查询中...")
+        threading.Thread(target=self._do_search_comments, args=(uid,), daemon=True).start()
 
+    def _do_search_comments(self, uid: str) -> None:
+        """后台线程: 并行查询本地DB和在线API,融合结果。"""
+        import os, sqlite3, time, requests
+
+        # 1. 本地DB查询
         db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "comments.db")
-        if not os.path.exists(db_path):
-            self._search_count_var.set("数据库不存在")
+        local_rows: list[dict] = []
+        if os.path.exists(db_path):
+            conn = sqlite3.connect(db_path)
+            rows = conn.execute(
+                "SELECT rpid,oid,ctime,message,parent FROM comments WHERE mid=? ORDER BY ctime DESC LIMIT 500",
+                (int(uid),),
+            ).fetchall()
+            conn.close()
+            for rpid, oid, ctime, msg, parent in rows:
+                local_rows.append({"rpid": rpid, "oid": oid, "ctime": ctime,
+                                    "message": msg, "parent": parent, "source": "本地"})
+
+        # 2. 在线API查询 (aicu.cc)
+        online_rows: list[dict] = []
+        online_available = False
+        try:
+            seen_rpids = {r["rpid"] for r in local_rows}
+            for pn in range(1, 6):  # 最多5页
+                resp = requests.get("https://api.aicu.cc/api/v3/search/getreply",
+                                    params={"uid": uid, "pn": pn, "ps": 100, "mode": 0},
+                                    timeout=8)
+                if resp.status_code == 502:
+                    break
+                data = resp.json()
+                if data.get("code") != 0:
+                    break
+                replies = data.get("data", {}).get("replies", [])
+                if not replies:
+                    break
+                online_available = True
+                for r in replies:
+                    rpid = r.get("rpid")
+                    if rpid not in seen_rpids:
+                        seen_rpids.add(rpid)
+                        online_rows.append({
+                            "rpid": rpid, "oid": r.get("oid", 0),
+                            "ctime": r.get("ctime", 0),
+                            "message": r.get("message", ""),
+                            "parent": r.get("parent", 0),
+                            "source": "在线",
+                        })
+                if data.get("data", {}).get("cursor", {}).get("is_end"):
+                    break
+                time.sleep(0.3)
+        except Exception:
+            pass  # 在线API不可用,静默fallback
+
+        # 3. 融合: 本地 + 在线去重
+        merged = local_rows + online_rows
+        merged.sort(key=lambda x: x["ctime"], reverse=True)
+
+        if not merged:
+            self.root.after(0, lambda: self._search_count_var.set(f"未找到 UID={uid} 的评论"))
             return
 
-        conn = sqlite3.connect(db_path)
-        rows = conn.execute(
-            """SELECT rpid,oid,ctime,message,parent
-               FROM comments WHERE mid=? ORDER BY ctime DESC LIMIT 500""",
-            (int(uid),),
-        ).fetchall()
-        conn.close()
+        local_count = len(local_rows)
+        online_count = len(online_rows)
+        self.root.after(0, lambda: self._search_count_var.set(
+            f"本地{local_count} + 在线{online_count} = {len(merged)}条"
+        ))
+        source_note = f"[本地{local_count}条 + 在线API{f'新增{online_count}条' if online_available else '不可用'}]"
+        self.root.after(0, lambda: self._show_comment_table_v2(uid, merged, source_note))
 
-        if not rows:
-            self._search_count_var.set(f"未找到 UID={uid} 的评论")
-            self._crawl_log_append(f"\n--- 检索 UID={uid}: 无结果 ---\n")
-            return
-
-        self._search_count_var.set(f"找到 {len(rows)} 条")
-        self._show_comment_table(uid, rows)
-
-    def _show_comment_table(self, uid: str, rows: list) -> None:
-        """弹出评论检索结果表格窗口。"""
+    def _show_comment_table_v2(self, uid: str, rows: list[dict], note: str) -> None:
+        """弹出融合结果表格窗口 (含来源列)。"""
         import time
         win = tk.Toplevel(self.root)
-        win.title(f"UID={uid} 的评论 ({len(rows)}条)")
-        win.geometry("860x520")
+        win.title(f"UID={uid} 的评论 ({len(rows)}条) {note}")
+        win.geometry("920x520")
         win.configure(bg=_COLOR_CARD)
 
         # 工具栏
         toolbar = tk.Frame(win, bg=_COLOR_CARD)
         toolbar.pack(fill=tk.X, padx=8, pady=(8, 4))
         tk.Label(toolbar, text=f"共 {len(rows)} 条评论", font=_FONT_HEADING, bg=_COLOR_CARD).pack(side=tk.LEFT)
-        tk.Button(toolbar, text="导出Excel", command=lambda: self._export_to_excel(uid, rows),
+        tk.Label(toolbar, text=note, font=("Microsoft YaHei", 8), bg=_COLOR_CARD, fg="#888").pack(side=tk.LEFT, padx=10)
+        tk.Button(toolbar, text="导出Excel", command=lambda: self._export_to_excel_v2(uid, rows),
                   bg=_COLOR_BILI_BLUE, fg="white", font=_FONT_BODY,
                   relief=tk.FLAT, padx=12, pady=2, cursor="hand2").pack(side=tk.RIGHT, padx=4)
 
@@ -447,41 +497,67 @@ class BiliSpiderGUI:
         tree_frame = tk.Frame(win, bg=_COLOR_CARD)
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
 
-        columns = ("time", "level", "oid", "rpid", "text")
-        tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
+        columns = ("time", "source", "level", "oid", "rpid", "text")
+        tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
         tree.heading("time", text="时间")
+        tree.heading("source", text="来源")
         tree.heading("level", text="层级")
         tree.heading("oid", text="视频oid")
         tree.heading("rpid", text="rpid")
         tree.heading("text", text="评论内容")
         tree.column("time", width=130, anchor="center")
+        tree.column("source", width=50, anchor="center")
         tree.column("level", width=50, anchor="center")
-        tree.column("oid", width=120, anchor="center")
-        tree.column("rpid", width=120, anchor="center")
-        tree.column("text", width=400)
+        tree.column("oid", width=110, anchor="center")
+        tree.column("rpid", width=110, anchor="center")
+        tree.column("text", width=420)
 
-        # 滚动条
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         tree.pack(fill=tk.BOTH, expand=True)
 
-        # 填充数据
-        for rpid, oid, ctime, msg, parent in rows:
-            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(ctime))
-            level = "二级" if parent > 0 else "一级"
-            text = str(msg)[:100].replace("\n", " ")
-            tree.insert("", tk.END, values=(ts, level, oid, rpid, text))
+        for r in rows:
+            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["ctime"]))
+            level = "二级" if r["parent"] > 0 else "一级"
+            text = str(r["message"])[:100].replace("\n", " ")
+            tree.insert("", tk.END, values=(ts, r["source"], level, r["oid"], r["rpid"], text))
 
-        # 双击打开B站视频链接
         def _on_double_click(event):
             item = tree.selection()
             if item:
-                oid = tree.item(item[0], "values")[2]
+                oid = tree.item(item[0], "values")[3]
                 import webbrowser
                 webbrowser.open(f"https://www.bilibili.com/video/av{oid}")
-
         tree.bind("<Double-1>", _on_double_click)
+
+    def _export_to_excel_v2(self, uid: str, rows: list[dict]) -> None:
+        """导出融合结果为 Excel。"""
+        from tkinter import filedialog, messagebox
+        import time
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".xlsx", filetypes=[("Excel文件", "*.xlsx")],
+            initialfile=f"{uid}_评论数据.xlsx")
+        if not filepath:
+            return
+        try:
+            import openpyxl; wb = openpyxl.Workbook(); ws = wb.active
+            ws.title = f"UID={uid}"; ws.append(["来源","rpid","视频oid","时间","层级","评论内容"])
+            for r in rows:
+                ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ctime"]))
+                ws.append([r["source"], r["rpid"], r["oid"], ts,
+                           "二级" if r["parent"] > 0 else "一级", str(r["message"])])
+            wb.save(filepath); messagebox.showinfo("导出成功", f"已保存到:\n{filepath}")
+        except ImportError:
+            filepath = filepath.replace(".xlsx", ".csv")
+            import csv
+            with open(filepath, "w", encoding="utf-8-sig", newline="") as f:
+                w = csv.writer(f); w.writerow(["来源","rpid","视频oid","时间","层级","评论内容"])
+                for r in rows:
+                    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ctime"]))
+                    w.writerow([r["source"], r["rpid"], r["oid"], ts,
+                                "二级" if r["parent"] > 0 else "一级", str(r["message"])])
+            messagebox.showinfo("导出成功", f"已保存为CSV:\n{filepath}")
 
     def _export_to_excel(self, uid: str, rows: list) -> None:
         """将检索结果导出为 Excel 文件。"""
