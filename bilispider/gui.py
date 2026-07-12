@@ -251,6 +251,20 @@ class BiliSpiderGUI:
         )
         self._crawl_progress_label.pack(side=tk.RIGHT, padx=(6, 0))
 
+        # ── 评论检索 ──
+        search_row = tk.Frame(parent, bg=_COLOR_CARD)
+        search_row.pack(fill=tk.X, padx=6, pady=(6, 0))
+        tk.Label(search_row, text="检索评论(UID):", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT)
+        self._search_uid_entry = tk.Entry(search_row, font=_FONT_BODY, width=18)
+        self._search_uid_entry.pack(side=tk.LEFT, padx=6)
+        self._search_uid_entry.bind("<Return>", lambda _e: self._search_comments())
+        tk.Button(search_row, text="搜索", command=self._search_comments,
+                  bg=_COLOR_BILI_BLUE, fg="white", font=_FONT_BODY,
+                  cursor="hand2", relief=tk.FLAT, padx=12, pady=2).pack(side=tk.LEFT, padx=4)
+        self._search_count_var = tk.StringVar(value="")
+        tk.Label(search_row, textvariable=self._search_count_var,
+                 font=("Microsoft YaHei", 9), bg=_COLOR_CARD, fg="#888").pack(side=tk.RIGHT)
+
         # ── 日志输出区 ──
         self._crawl_log = scrolledtext.ScrolledText(
             parent, font=_FONT_MONO, wrap=tk.WORD,
@@ -382,6 +396,42 @@ class BiliSpiderGUI:
         self._crawl_log.insert(tk.END, text)
         self._crawl_log.see(tk.END)
         self._crawl_log.configure(state=tk.DISABLED)
+
+    def _search_comments(self) -> None:
+        """检索指定 UID 发布的所有评论 (从本地数据库)。"""
+        uid = self._search_uid_entry.get().strip()
+        if not uid.isdigit():
+            self._search_count_var.set("请输入有效UID")
+            return
+
+        import os, sqlite3, time
+
+        db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "comments.db")
+        if not os.path.exists(db_path):
+            self._search_count_var.set("数据库不存在")
+            return
+
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute(
+            """SELECT rpid,oid,ctime,message,parent
+               FROM comments WHERE mid=? ORDER BY ctime DESC LIMIT 200""",
+            (int(uid),),
+        ).fetchall()
+        conn.close()
+
+        if not rows:
+            self._search_count_var.set(f"未找到 UID={uid} 的评论")
+            self._crawl_log_append(f"\n--- 检索 UID={uid}: 无结果 ---\n")
+            return
+
+        self._search_count_var.set(f"找到 {len(rows)} 条")
+        lines = [f"\n--- 检索 UID={uid} 的评论 ({len(rows)}条) ---\n"]
+        for rpid, oid, ctime, msg, parent in rows:
+            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(ctime))
+            level = "[二级]" if parent > 0 else "[一级]"
+            text = str(msg)[:80].replace("\n", " ")
+            lines.append(f"  {ts} {level} oid={oid} rpid={rpid}: {text}")
+        self._crawl_log_append("\n".join(lines) + "\n")
 
     def _build_status_bar(self) -> None:
         """底部状态栏。"""
@@ -532,9 +582,11 @@ class BiliSpiderGUI:
     def _query_user(self) -> None:
         """根据输入的 UID 查询用户信息和视频列表。"""
         uid_text = self._uid_entry.get().strip()
-        # 同步到爬取标签页的 UID 输入框
+        # 同步到爬取标签页的 UID 输入框和检索 UID
         self._crawl_uid_entry.delete(0, tk.END)
         self._crawl_uid_entry.insert(0, uid_text)
+        self._search_uid_entry.delete(0, tk.END)
+        self._search_uid_entry.insert(0, uid_text)
         if not uid_text:
             messagebox.showwarning("提示", "请输入目标用户的 UID")
             return
