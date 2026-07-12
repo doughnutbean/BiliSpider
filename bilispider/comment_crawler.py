@@ -1092,6 +1092,7 @@ class CommentCrawler:
                 )
 
                 if result is None:
+                    self._delay()
                     break
 
                 sub_replies = result["data"].get("replies", [])
@@ -1133,12 +1134,14 @@ class CommentCrawler:
                 if len(sub_replies) < _PAGE_SIZE:
                     break  # 最后一页
 
-                self._delay(extra=0.5)  # 子评论多加一点延迟
+                self._delay(extra=1.0)  # 子评论页间延迟
                 page_num += 1
 
             # 标记该根评论子评论完成
             sub_progress[root_rpid_str] = sub_count
             self.db.upsert_progress(oid, ctype, sub_progress=json.dumps(sub_progress))
+            # 根评论之间加延迟,避免子评论请求过于密集触发风控
+            self._delay()
 
         # 更新总子评论数
         total_subs = self.db.conn.execute(
