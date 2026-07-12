@@ -4,19 +4,18 @@
 这个接口属于无需 WBI 签名的 API，直接带 Cookie 即可请求。
 
 用法:
+    # 第一步: 先扫码登录
+    python login.py
+
+    # 第二步: 获取个人信息
     python get_my_info.py
 
-前提：需要在脚本内填入有效的 B站 Cookie（SESSDATA 字段必须有值）。
+Cookie 自动从 cookies.json 加载,无需手动填入。
 """
 
 import requests
 
-
-# ============================================================
-# ⚠️ 使用前请将下面的字符串替换为你自己的 B站 Cookie
-#    获取方式: 浏览器登录 B站后, F12 → Application → Cookies → 复制完整 cookie
-# ============================================================
-MY_COOKIE = "Input_your_cookie_here"
+from bilispider.login import get_cookie_string, is_logged_in
 
 
 def get_my_account_info(cookie: str) -> None:
@@ -65,7 +64,15 @@ def get_my_account_info(cookie: str) -> None:
 
 # --- 主程序入口 ---
 if __name__ == "__main__":
-    if "SESSDATA" not in MY_COOKIE or MY_COOKIE == "Input_your_cookie_here":
-        print("❌ 错误: 请在脚本中填入有效的 B站 Cookie (必须包含 SESSDATA 字段)")
+    # 自动从 cookies.json 加载 Cookie
+    cookie = get_cookie_string()
+    if not cookie:
+        print("❌ 未找到有效的 Cookie。")
+        print("   请先运行 python login.py 扫码登录。")
     else:
-        get_my_account_info(cookie=MY_COOKIE)
+        logged_in, username, uid = is_logged_in(cookie)
+        if logged_in:
+            print(f"当前登录: {username} (UID: {uid})")
+            get_my_account_info(cookie=cookie)
+        else:
+            print("❌ Cookie 已失效,请重新运行 python login.py 扫码登录。")
