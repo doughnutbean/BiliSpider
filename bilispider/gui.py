@@ -835,6 +835,18 @@ class BiliSpiderGUI:
                              relief=tk.FLAT, padx=12, pady=2, cursor="hand2")
         copy_btn.pack(side=tk.RIGHT, padx=4)
 
+        # 关键词过滤
+        filter_row = tk.Frame(win, bg=_COLOR_CARD)
+        filter_row.pack(fill=tk.X, padx=8, pady=(2, 2))
+        tk.Label(filter_row, text="关键词:", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT)
+        self._filter_entry = tk.Entry(filter_row, font=_FONT_BODY, width=25)
+        self._filter_entry.pack(side=tk.LEFT, padx=6)
+        self._filter_count_var = tk.StringVar(value=f"共 {len(rows)} 条")
+        tk.Label(filter_row, textvariable=self._filter_count_var, font=("Microsoft YaHei", 9),
+                 bg=_COLOR_CARD, fg="#888").pack(side=tk.LEFT, padx=10)
+        tk.Button(filter_row, text="清除", command=lambda: self._clear_filter(tree, rows),
+                  font=("Microsoft YaHei", 8), relief=tk.FLAT, padx=8, cursor="hand2").pack(side=tk.LEFT)
+
         # 表格
         tree_frame = tk.Frame(win, bg=_COLOR_CARD)
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
@@ -853,6 +865,22 @@ class BiliSpiderGUI:
         tree.column("oid", width=110, anchor="center")
         tree.column("rpid", width=110, anchor="center")
         tree.column("text", width=420)
+
+        # 关键词过滤绑定
+        filter_tree = tree
+        def _on_filter_change(_event):
+            kw = self._filter_entry.get().strip().lower()
+            visible = 0
+            for item in filter_tree.get_children():
+                vals = filter_tree.item(item, "values")
+                text_val = str(vals[5]).lower() if len(vals) > 5 else ""
+                if not kw or kw in text_val:
+                    filter_tree.reattach(item, "", tk.END)  # 移到末尾(显示)
+                    visible += 1
+                else:
+                    filter_tree.detach(item)  # 隐藏
+            self._filter_count_var.set(f"共 {len(rows)} 条 / 显示 {visible} 条")
+        self._filter_entry.bind("<KeyRelease>", _on_filter_change)
 
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
@@ -883,6 +911,13 @@ class BiliSpiderGUI:
         tree.bind("<Button-3>", _on_right_click)
         # Ctrl+C 快捷键
         win.bind("<Control-c>", lambda e: self._copy_selected_rows(tree))
+
+    def _clear_filter(self, tree: ttk.Treeview, rows: list) -> None:
+        """清除关键词过滤,恢复全部行。"""
+        self._filter_entry.delete(0, tk.END)
+        # 触发过滤回调,空关键词会显示全部
+        self._filter_entry.event_generate("<KeyRelease>")
+        self._filter_count_var.set(f"共 {len(rows)} 条")
 
     def _copy_selected_rows(self, tree: ttk.Treeview) -> None:
         """复制 Treeview 中选中行的内容到剪贴板。"""
