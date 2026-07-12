@@ -12,6 +12,7 @@ B站数据爬取工具 —— Tkinter 图形化界面。
 
 from __future__ import annotations
 
+import sys
 import threading
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
