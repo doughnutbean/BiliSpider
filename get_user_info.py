@@ -4,23 +4,26 @@
 对 /x/space/wbi/acc/info 接口发起请求,该接口需要 WBI 签名。
 
 用法:
+    # 第一步: 先扫码登录
+    python login.py
+
+    # 第二步: 获取用户信息
     python get_user_info.py
 
-前提：
-    1. 填入有效的 B站 Cookie（非必须,但加了 Cookie 可获取更完整信息）
-    2. 填入目标用户的 UID (mid)
+Cookie 自动从 cookies.json 加载,只需在脚本中填入目标用户的 UID。
 """
 
 import requests
 
+from bilispider.login import get_cookie_string, is_logged_in
 from bilispider.wbi import enc_wbi, get_wbi_keys
 
 
 # ============================================================
-# ⚠️ 使用前请修改以下两个变量
+# ⚠️ 使用前请修改: 目标用户的 UID
+#    (B站站长 bishi 的 UID 为 2)
 # ============================================================
-MY_COOKIE = "Input_your_cookie_here"       # 你的 B站 Cookie
-TARGET_UID = "2"                           # 目标用户的 UID (B站站长 bishi 的 UID 为 2)
+TARGET_UID = "2"
 
 
 def get_user_info(uid: str, cookie: str = "") -> None:
@@ -91,7 +94,17 @@ def get_user_info(uid: str, cookie: str = "") -> None:
 
 # --- 主程序入口 ---
 if __name__ == "__main__":
-    if TARGET_UID == "Input_a_mid_here":
-        print("❌ 错误: 请在脚本中填入目标用户的 UID")
+    # 自动从 cookies.json 加载 Cookie
+    cookie = get_cookie_string()
+    if not cookie:
+        print("❌ 未找到有效的 Cookie。")
+        print("   请先运行 python login.py 扫码登录。")
+        print("   若不想登录,也可以手动设置环境变量 BILI_COOKIE 后重试。")
     else:
-        get_user_info(uid=TARGET_UID, cookie=MY_COOKIE)
+        logged_in, username, uid = is_logged_in(cookie)
+        if logged_in:
+            print(f"当前登录: {username} (UID: {uid})")
+        else:
+            print("⚠️ Cookie 可能已失效,建议重新运行 python login.py 扫码登录。")
+
+        get_user_info(uid=TARGET_UID, cookie=cookie)
