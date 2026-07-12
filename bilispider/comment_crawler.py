@@ -71,13 +71,14 @@ _PAUSE_RISK = 90.0         # -412 风控拦截
 class RateController:
     """自适应速率控制器: 监控412事件,动态调整请求延迟。"""
 
-    STATIC_NORMAL = "normal"
-    STATIC_WARNING = "warning"
-    STATIC_COOLING = "cooling"
-    STATIC_RECOVERY = "recovery"
+    STATE_NORMAL = "normal"
+    STATE_WARNING = "warning"
+    STATE_COOLING = "cooling"
+    STATE_RECOVERY = "recovery"
+    STATE_SNOOZE = "snooze"
 
     def __init__(self) -> None:
-        self._state = self.STATIC_NORMAL
+        self._state = self.STATE_NORMAL
         self._412_events: list[dict] = []  # 所有412事件(持久化)
         self._412_archive: list[dict] = [] # 归档的412(不参与计数)
         self._request_times: list[float] = []  # 最近请求时间
@@ -94,6 +95,10 @@ class RateController:
         self._global_max_rate = 0.0           # 学习到的安全速率上限 (0=未学习)
         self._tune_interval = 20 * 60        # 稳定20分钟后才尝试提速
         self._tune_delta = 0.3               # 每次提速步长
+        # 自适应沉睡
+        self._snooze_duration = 600.0         # 沉睡时长(秒), 起始10分钟
+        self._snooze_until = 0.0              # 沉睡到的时间戳
+        self._cooling_count = 0               # 进入冷却次数
 
     # ── 公共接口 ──
 
@@ -110,7 +115,7 @@ class RateController:
 
     def _try_tune_up(self) -> None:
         """如果长时间无412,尝试略微提升速率。"""
-        if self._state != self.STATIC_NORMAL:
+        if self._state != self.STATE_NORMAL:
             return
         now = time.time()
         if not self._stable_since:
@@ -151,7 +156,7 @@ class RateController:
         """请求成功后调用,累积恢复进度。"""
         self._total_success += 1
         self._success_streak += 1
-        if self._state != self.STATIC_NORMAL and self._success_streak >= 10:
+        if self._state != self.STATE_NORMAL and self._success_streak >= 10:
             self._enter_recovery()
 
     def on_412(self, url: str, api_type: str) -> str:
@@ -307,7 +312,7 @@ class RateController:
         return "\n".join(lines)
 
     def _enter_warning(self, count: int) -> str:
-        self._state = self.STATIC_WARNING
+        self._state = self.STATE_WARNING
         self._base_delay = 5.0 + count * 2
         self._jitter = 5.0
         msg = f"[RATE] 进入警戒模式 (412x{count}) — 延迟={self._base_delay}s~{self._base_delay+self._jitter}s"
@@ -315,7 +320,7 @@ class RateController:
         return msg
 
     def _enter_cooling(self, count: int) -> str:
-        self._state = self.STATIC_COOLING
+        self._state = self.STATE_COOLING
         self._base_delay = 30.0 + count * 5
         self._jitter = 30.0
         msg = f"[RATE] 进入冷却模式 (412x{count}) — 延迟={self._base_delay}s~{self._base_delay+self._jitter}s"
@@ -323,12 +328,12 @@ class RateController:
         return msg
 
     def _enter_recovery(self) -> str:
-        self._state = self.STATIC_RECOVERY
+        self._state = self.STATE_RECOVERY
         # 逐步恢复: 每成功5次降低一次延迟
         self._base_delay = max(2.0, self._base_delay - 1.0)
         self._jitter = max(1.0, self._jitter - 1.0)
         if self._base_delay <= 2.5:
-            self._state = self.STATIC_NORMAL
+            self._state = self.STATE_NORMAL
             self._base_delay = 2.0
             self._jitter = 2.0
             msg = "[RATE] 恢复正常模式"
@@ -336,6 +341,23 @@ class RateController:
             msg = f"[RATE] 恢复模式 — 延迟={self._base_delay}s~{self._base_delay+self._jitter}s"
         print(f"  {msg}")
         return msg
+
+    def _enter_snooze(self) -> None:
+        """进入沉睡状态,自适应倍增沉睡时长。"""
+        self._state = self.STATE_SNOOZE
+        self._cooling_count += 1
+        # 每次冷却沉睡时长大2倍: 10min→20min→40min→80min...
+        self._snooze_duration = 600.0 * (2 ** (self._cooling_count - 1))
+        self._base_delay = 2.0
+        self._jitter = 2.0
+
+    def _exit_snooze(self) -> None:
+        """退出沉睡,恢复正常模式。"""
+        self._state = self.STATE_NORMAL
+        self._stable_since = time.time()
+        self._success_streak = 0
+        # 沉睡后重置412计数器(保留档案)
+        self._412_events = []
 
 
 # B站评论分页
@@ -732,11 +754,14 @@ class CommentCrawler:
                     api_type = "reply" if "/reply" in url else "search" if "search" in url else "other"
                     self._rate_ctrl.on_412(url, api_type)
                     state = self._rate_ctrl.get_state()
-                    # 冷却模式下再遇412: Cookie/代理已被标记,直接终止爬取
-                    if state == RateController.STATIC_COOLING:
-                        print(f"  [!] 连续412 — Cookie/代理可能已被标记,终止爬取")
-                        print(f"  [!] 建议: 更换代理、等待10分钟后刷新Cookie重新登录")
-                        self._cancelled = True
+                    # 冷却模式 → 进入自适应沉睡,自动恢复
+                    if state == RateController.STATE_COOLING:
+                        self._rate_ctrl._enter_snooze()
+                        snooze_s = self._rate_ctrl._snooze_duration
+                        print(f"  [!] 连续412 — 进入沉睡 {snooze_s/60:.0f} 分钟,自动恢复...")
+                        time.sleep(snooze_s)
+                        self._rate_ctrl._exit_snooze()
+                        print(f"  [*] 沉睡结束,恢复爬取")
                         return None
                     delay = self._rate_ctrl.on_request()
                     time.sleep(delay)
