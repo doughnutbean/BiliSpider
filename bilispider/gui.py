@@ -315,6 +315,8 @@ class BiliSpiderGUI:
             import io
             old_stdout = sys.stdout
             log_buffer = io.StringIO()
+            gui_log_append = self._crawl_log_append
+            gui_root = self.root
 
             class _LogWriter:
                 def write(self, s):
@@ -326,11 +328,9 @@ class BiliSpiderGUI:
                     log_buffer.truncate(0)
                     log_buffer.seek(0)
                     if text:
-                        self._root.after(0, lambda t=text: self._crawl_log_append(t))
-            import sys as _sys
-            writer = _LogWriter()
-            writer._root = self.root
-            _sys.stdout = writer
+                        gui_root.after(0, lambda t=text: gui_log_append(t))
+
+            sys.stdout = _LogWriter()
 
             try:
                 if not crawler.setup():
@@ -343,7 +343,7 @@ class BiliSpiderGUI:
             except Exception as e:
                 self.root.after(0, lambda: self._crawl_done(f"出错: {e}"))
             finally:
-                _sys.stdout = old_stdout
+                sys.stdout = old_stdout
 
         threading.Thread(target=_run, daemon=True).start()
 
