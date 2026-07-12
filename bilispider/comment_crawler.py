@@ -86,6 +86,14 @@ class RateController:
         self._jitter = 2.0                  # 当前抖动范围
         self._total_requests = 0            # 总请求计数
         self._total_success = 0             # 总成功计数
+        # 自适应速率调优
+        self._auto_tune_enabled = True      # 启用自动提速
+        self._stable_since = 0.0             # 上次412后的时间戳
+        self._tune_step = 0                  # 提速次数
+        self._412_rates: list[float] = []    # 触发412时的速率 (req/min)
+        self._global_max_rate = 0.0           # 学习到的安全速率上限 (0=未学习)
+        self._tune_interval = 20 * 60        # 稳定20分钟后才尝试提速
+        self._tune_delta = 0.3               # 每次提速步长
 
     # ── 公共接口 ──
 
@@ -93,16 +101,56 @@ class RateController:
         """每次请求前调用,返回应等待的秒数。"""
         self._total_requests += 1
         self._request_times.append(time.time())
-        # 只保留最近5分钟
         cutoff = time.time() - 300
         self._request_times = [t for t in self._request_times if t > cutoff]
+        # 自适应提速检查
+        if self._auto_tune_enabled:
+            self._try_tune_up()
         return self._base_delay + random.uniform(0, self._jitter)
+
+    def _try_tune_up(self) -> None:
+        """如果长时间无412,尝试略微提升速率。"""
+        if self._state != self.STATIC_NORMAL:
+            return
+        now = time.time()
+        if not self._stable_since:
+            self._stable_since = now
+            return
+        stable_duration = now - self._stable_since
+        if stable_duration < self._tune_interval:
+            return
+        # 已学习到安全速率上限,将延迟锁定在安全值上
+        if self._global_max_rate > 0:
+            safe_delay = 60.0 / self._global_max_rate
+            if self._base_delay < safe_delay:
+                self._base_delay = safe_delay
+                self._jitter = safe_delay * 0.5
+                print(f"  [TUNE] 延迟已锁定到安全值: {self._base_delay:.1f}s (≤{self._global_max_rate:.1f}rpm)")
+            return
+        # 减速: 降低延迟 = 提高速率
+        new_base = max(0.5, self._base_delay - self._tune_delta)
+        new_jitter = max(0.3, self._jitter - 0.2)
+        if new_base != self._base_delay:
+            self._base_delay = new_base
+            self._jitter = new_jitter
+            self._tune_step += 1
+            self._stable_since = now  # 重置计时器
+            print(f"  [TUNE] 提速 #{self._tune_step}: 延迟降为 {self._base_delay:.1f}s~{self._base_delay+self._jitter:.1f}s")
+
+    def _compute_current_rate(self) -> float:
+        """计算当前请求速率 (req/min),基于最近5分钟的请求数。"""
+        if not self._request_times:
+            return 0.0
+        now = time.time()
+        recent = [t for t in self._request_times if now - t <= 60]
+        if not recent:
+            return 0.0
+        return len(recent) / ((now - recent[0]) / 60) if len(recent) > 1 else 60.0
 
     def on_success(self) -> None:
         """请求成功后调用,累积恢复进度。"""
         self._total_success += 1
         self._success_streak += 1
-        # 连续成功10次 + 当前非NORMAL → 进入恢复模式
         if self._state != self.STATIC_NORMAL and self._success_streak >= 10:
             self._enter_recovery()
 
@@ -136,6 +184,23 @@ class RateController:
         self._412_events = recent_412
         recent_count = len(recent_412)
         self._success_streak = 0
+        self._stable_since = 0.0  # 重置稳定计时器
+
+        # 记录触发412时的速率,学习安全上限
+        if self._auto_tune_enabled:
+            current_rate = self._compute_current_rate()
+            if current_rate > 0:
+                self._412_rates.append(current_rate)
+                entry["trigger_rate"] = round(current_rate, 1)
+                print(f"  [TUNE] 412触发时速率: {current_rate:.1f} req/min")
+                # 收集足够样本后,取最小触发速率,在下方设安全上限
+                if len(self._412_rates) >= 3:
+                    min_trigger_rate = min(self._412_rates)
+                    safe_rate = min_trigger_rate * 0.85  # 取最小值的85%
+                    if self._global_max_rate == 0 or safe_rate < self._global_max_rate:
+                        self._global_max_rate = safe_rate
+                        print(f"  [TUNE] 学习到安全速率上限: {self._global_max_rate:.1f} req/min "
+                              f"(最小触发={min_trigger_rate:.1f} × 0.85)")
 
         if recent_count >= 3:
             return self._enter_cooling(recent_count)
@@ -213,6 +278,15 @@ class RateController:
             state_changes.append(f"{e['state_before']}→")
         lines.append(f"\n  ── 状态转换链 ──")
         lines.append(f"    {' → '.join(state_changes[:20])}")
+
+        # ── 自适应调速 ──
+        if self._412_rates:
+            lines.append(f"\n  ── 自适应调速 ──")
+            lines.append(f"    提速次数: {self._tune_step}")
+            lines.append(f"    触发速率样本: {[round(r,1) for r in self._412_rates]}")
+            lines.append(f"    最小触发: {min(self._412_rates):.1f} req/min")
+            if self._global_max_rate > 0:
+                lines.append(f"    安全上限: {self._global_max_rate:.1f} req/min (延迟 ≥ {60/self._global_max_rate:.1f}s)")
 
         # ── 诊断结论 ──
         lines.append(f"\n  ── 诊断 ──")
