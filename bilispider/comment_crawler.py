@@ -57,7 +57,9 @@ _DB_PATH = os.path.join(_PROJECT_ROOT, "comments.db")
 # 请求频率控制 (秒)
 _MIN_DELAY = 2.0          # 最小间隔
 _MAX_DELAY = 4.0          # 最大间隔
-_WBI_REFRESH_INTERVAL = 10  # 每N次请求刷新 WBI 密钥
+_WBI_REFRESH_INTERVAL = 10  # 每N次请求刷新 WBI 密钥 (基于请求计数)
+_WBI_REFRESH_TTL = 6 * 3600     # WBI 密钥缓存有效期: 6小时 (基于时间)
+_WBI_SIGN_FAIL_COOLING = 15.0   # 签名失败后短暂冷却时间(秒)
 _MAX_RETRIES = 3           # 每个请求最大重试次数
 _RETRY_BASE_DELAY = 5.0    # 重试基础延迟
 
@@ -380,6 +382,7 @@ class CommentCrawler:
         self._img_key = ""
         self._sub_key = ""
         self._request_count = 0
+        self._wbi_ts = 0.0
         self._cancelled = False
         # 速率控制器
         self._rate_ctrl = RateController()
@@ -509,13 +512,32 @@ class CommentCrawler:
     # ── 请求控制 ──
 
     def _maybe_refresh_wbi(self) -> None:
-        """按间隔刷新 WBI 密钥。"""
+        """
+        WBI 密钥刷新策略 (双保险):
+          - 正常状态: 每 10 次请求 OR 每 6 小时自动刷新
+          - 异常状态: -352 时由 _signed_get 调用 _force_refresh_wbi()
+        """
         self._request_count += 1
-        if self._request_count % _WBI_REFRESH_INTERVAL == 0:
-            try:
-                self._img_key, self._sub_key = get_wbi_keys()
-            except Exception:
-                pass  # 刷新失败,继续用旧 key
+        now = time.time()
+        if not self._wbi_ts:
+            self._wbi_ts = now
+
+        need_refresh = (
+            self._request_count % _WBI_REFRESH_INTERVAL == 0
+            or (now - self._wbi_ts) > _WBI_REFRESH_TTL
+        )
+        if need_refresh:
+            self._force_refresh_wbi()
+
+    def _force_refresh_wbi(self) -> None:
+        """强制刷新 WBI 密钥并更新时间戳。"""
+        try:
+            self._img_key, self._sub_key = get_wbi_keys()
+            self._wbi_ts = time.time()
+            self._request_count = 0
+            print("[*] WBI 密钥已刷新")
+        except Exception as e:
+            print(f"[!] WBI 密钥刷新失败: {e}")
 
     def _delay(self, extra: float = 0.0) -> None:
         """自适应延迟,根据风控状态动态调整。"""
@@ -563,14 +585,11 @@ class CommentCrawler:
                     self._rate_ctrl.on_success()
                     return data
                 elif code in (-352,):
-                    # -352: 风控校验失败 (签名可能过期)
+                    # -352: 签名失效 → 强制刷新WBI密钥 + 短暂冷却
                     self._rate_ctrl._success_streak = 0
-                    print(f"  [!] API -352 风控校验失败,刷新 WBI 密钥后重试")
-                    try:
-                        self._img_key, self._sub_key = get_wbi_keys()
-                    except Exception:
-                        pass
-                    time.sleep(_PAUSE_ANTI_FREQ)
+                    print(f"  [!] API -352 签名失效,强制刷新WBI密钥后冷却 {_WBI_SIGN_FAIL_COOLING}s...")
+                    self._force_refresh_wbi()
+                    time.sleep(_WBI_SIGN_FAIL_COOLING)
                 elif code in (-799,):
                     # -799: 请求过于频繁
                     wait = _PAUSE_ANTI_FREQ * (attempt + 1)
