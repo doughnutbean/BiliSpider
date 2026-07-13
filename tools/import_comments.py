@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+from json import JSONDecodeError
 from pathlib import Path
 import sqlite3
 import sys
@@ -47,6 +48,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def normalize_record(record: dict, source: Path, line_no: int) -> tuple:
+    if not isinstance(record, dict):
+        raise ValueError(f"{source}:{line_no} JSON value must be an object")
     missing = [key for key in COMMENT_COLUMNS if key not in record]
     if missing:
         raise ValueError(f"{source}:{line_no} missing fields: {', '.join(missing)}")
@@ -75,8 +78,11 @@ def expand_input_files(patterns: list[str]) -> list[Path]:
     return files
 
 
-def import_file(conn: sqlite3.Connection, path: Path) -> tuple[int, int]:
+def import_file(conn: sqlite3.Connection, path: Path) -> dict:
     read_count = 0
+    empty_count = 0
+    uids: set[int] = set()
+    oids: set[int] = set()
     before = conn.total_changes
 
     with path.open("r", encoding="utf-8-sig") as fh:
@@ -84,33 +90,68 @@ def import_file(conn: sqlite3.Connection, path: Path) -> tuple[int, int]:
             for line_no, line in enumerate(fh, 1):
                 line = line.strip()
                 if not line:
+                    empty_count += 1
                     continue
-                record = json.loads(line)
-                conn.execute(INSERT_SQL, normalize_record(record, path, line_no))
+                try:
+                    record = json.loads(line)
+                    values = normalize_record(record, path, line_no)
+                except JSONDecodeError as exc:
+                    raise ValueError(f"{path}:{line_no} invalid JSON: {exc.msg}") from exc
+                uids.add(int(record["mid"]))
+                oids.add(int(record["oid"]))
+                conn.execute(INSERT_SQL, values)
                 read_count += 1
 
     inserted = conn.total_changes - before
-    return read_count, inserted
+    return {
+        "read": read_count,
+        "inserted": inserted,
+        "skipped": read_count - inserted,
+        "empty": empty_count,
+        "uids": uids,
+        "oids": oids,
+    }
 
 
 def main() -> None:
     args = parse_args()
     db_path = Path(args.db)
     ensure_data_dir()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    CommentDatabase(str(db_path)).close()
+    with CommentDatabase(str(db_path)):
+        pass
 
     total_read = 0
     total_inserted = 0
+    total_empty = 0
+    all_uids: set[int] = set()
+    all_oids: set[int] = set()
     files = expand_input_files(args.files)
     with sqlite3.connect(db_path) as conn:
         for path in files:
-            read_count, inserted = import_file(conn, path)
-            total_read += read_count
-            total_inserted += inserted
-            print(f"{path}: read {read_count}, inserted {inserted}, skipped {read_count - inserted}")
+            try:
+                stats = import_file(conn, path)
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+            total_read += stats["read"]
+            total_inserted += stats["inserted"]
+            total_empty += stats["empty"]
+            all_uids.update(stats["uids"])
+            all_oids.update(stats["oids"])
+            print(
+                f"{path}: read {stats['read']}, inserted {stats['inserted']}, "
+                f"skipped {stats['skipped']}, uids {len(stats['uids'])}, oids {len(stats['oids'])}"
+            )
 
-    print(f"Done. Read {total_read}, inserted {total_inserted}, skipped {total_read - total_inserted}.")
+    print("Done.")
+    print(f"  Files       : {len(files)}")
+    print(f"  Read        : {total_read}")
+    print(f"  Inserted    : {total_inserted}")
+    print(f"  Skipped     : {total_read - total_inserted}")
+    print(f"  Empty lines : {total_empty}")
+    print(f"  Unique UIDs : {len(all_uids)}")
+    print(f"  Unique OIDs : {len(all_oids)}")
 
 
 if __name__ == "__main__":

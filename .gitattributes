@@ -1,0 +1,2 @@
+*.jsonl text eol=lf
+datasets/*.jsonl text eol=lf
