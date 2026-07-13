@@ -99,6 +99,8 @@ class BiliSpiderGUI:
         self._qr_window: Optional[tk.Toplevel] = None
         self._qr_login_active = False
         self._qr_cancel_event: Optional[threading.Event] = None
+        self._qr_image_label: Optional[tk.Label] = None
+        self._qr_photo = None
 
         # 评论爬取状态
         self._crawler: Optional[CommentCrawler] = None
@@ -556,6 +558,16 @@ class BiliSpiderGUI:
 
         tk.Label(self._qr_window, text="请使用哔哩哔哩 App 扫码登录",
                  font=_FONT_HEADING, bg=_COLOR_CARD, fg="#333").pack(pady=(16, 8))
+        self._qr_image_label = tk.Label(
+            self._qr_window,
+            text="二维码生成中...",
+            font=_FONT_BODY,
+            bg=_COLOR_CARD,
+            fg="#888",
+            width=30,
+            height=14,
+        )
+        self._qr_image_label.pack(padx=16, pady=(0, 8))
         self._qr_url_var = tk.StringVar(value="正在生成...")
         tk.Label(self._qr_window, textvariable=self._qr_url_var,
                  font=("Microsoft YaHei", 8), bg=_COLOR_CARD, fg="#888",
@@ -574,6 +586,7 @@ class BiliSpiderGUI:
             if msg.startswith("__QRCODE_URL__:"):
                 url = msg[len("__QRCODE_URL__:"):]
                 self.root.after(0, lambda: self._qr_url_var.set(url))
+                self.root.after(0, lambda: self._render_qr_code(url))
             elif "扫描" in msg or "扫码" in msg or "确认" in msg:
                 self.root.after(0, lambda: self._qr_status_var.set(f"📱 {msg}"))
             elif "成功" in msg:
@@ -583,11 +596,41 @@ class BiliSpiderGUI:
 
         def _login_thread():
             try:
-                qr_login(status_callback=_status_callback, cancel_event=cancel_event)
+                qr_login(
+                    status_callback=_status_callback,
+                    cancel_event=cancel_event,
+                    show_terminal_qr=False,
+                )
             except Exception as e:
                 self.root.after(0, lambda: self._on_qr_failure(f"登录异常: {e}"))
 
         threading.Thread(target=_login_thread, daemon=True).start()
+
+    def _render_qr_code(self, url: str) -> None:
+        """Render the login QR code into the GUI dialog."""
+        if not self._qr_window or not self._qr_image_label:
+            return
+        try:
+            import qrcode  # type: ignore
+            from PIL import ImageTk  # type: ignore
+
+            qr = qrcode.QRCode(border=2, box_size=8)
+            qr.add_data(url)
+            qr.make(fit=True)
+            image = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+            image = image.resize((260, 260))
+            self._qr_photo = ImageTk.PhotoImage(image)
+            self._qr_image_label.configure(image=self._qr_photo, text="", width=260, height=260)
+            self._qr_status_var.set("请使用哔哩哔哩 App 扫码")
+        except Exception as exc:
+            self._qr_photo = None
+            self._qr_image_label.configure(
+                image="",
+                text=f"二维码渲染失败，请复制下方链接打开：{exc}",
+                wraplength=320,
+                width=36,
+                height=8,
+            )
 
     def _on_qr_success(self, msg: str) -> None:
         self._qr_status_var.set(f"✅ {msg}")
@@ -595,6 +638,8 @@ class BiliSpiderGUI:
         if self._qr_window:
             self._qr_window.after(800, self._qr_window.destroy)
             self._qr_window = None
+        self._qr_image_label = None
+        self._qr_photo = None
         self._set_status("登录成功")
         self._check_login()
 
@@ -613,6 +658,8 @@ class BiliSpiderGUI:
         if self._qr_window:
             self._qr_window.destroy()
             self._qr_window = None
+        self._qr_image_label = None
+        self._qr_photo = None
 
     # ─── 查询逻辑 ───────────────────────────────────────────────
 
@@ -930,17 +977,11 @@ class BiliSpiderGUI:
                     break
                 online_state = {"status": "available", "message": f"第 {pn} 页可用"}
                 for r in replies:
-                    rpid = r.get("rpid")
+                    row = self._online_reply_to_row(r)
+                    rpid = row["rpid"]
                     if rpid not in seen_rpids:
                         seen_rpids.add(rpid)
-                        online_rows.append({
-                            "rpid": rpid,
-                            "oid": r.get("oid", 0),
-                            "ctime": r.get("ctime", 0),
-                            "message": r.get("message", "") or "",
-                            "parent": r.get("parent", 0),
-                            "source": "在线",
-                        })
+                        online_rows.append(row)
                 if data.get("data", {}).get("cursor", {}).get("is_end"):
                     break
                 time.sleep(0.3)
@@ -977,6 +1018,44 @@ class BiliSpiderGUI:
         self.root.after(0, lambda: self._search_count_var.set(summary))
         self.root.after(0, lambda: self._set_status(summary))
         self.root.after(0, lambda: self._show_comment_table_v2(uid, merged, summary))
+
+    def _to_int(self, value, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _online_reply_to_row(self, reply: dict) -> dict:
+        """Normalize AICU online reply records to the local table shape."""
+        dyn = reply.get("dyn") if isinstance(reply.get("dyn"), dict) else {}
+        return {
+            "rpid": self._to_int(reply.get("rpid")),
+            "oid": self._to_int(reply.get("oid", dyn.get("oid", 0))),
+            "ctime": self._to_int(reply.get("ctime", reply.get("time", 0))),
+            "message": reply.get("message", "") or "",
+            "parent": reply.get("parent", 0),
+            "source": "在线",
+        }
+
+    def _comment_parent_value(self, row: dict) -> int:
+        """Return a numeric parent value from local DB rows or online API rows."""
+        parent = row.get("parent", 0)
+        if isinstance(parent, dict):
+            for key in ("rpid", "id", "parent", "root", "parentid", "rootid"):
+                value = parent.get(key)
+                if value not in (None, "", 0, "0"):
+                    try:
+                        return int(value)
+                    except (TypeError, ValueError):
+                        return 1
+            return 1 if parent else 0
+        try:
+            return int(parent or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _comment_level(self, row: dict) -> str:
+        return "二级" if self._comment_parent_value(row) > 0 else "一级"
 
     def _show_comment_table_v2(self, uid: str, rows: list[dict], note: str) -> None:
         """弹出融合结果表格窗口 (含来源列、关键词筛选、复制、导出)。"""
@@ -1020,16 +1099,13 @@ class BiliSpiderGUI:
                              bg="#666", fg="white", font=_FONT_BODY,
                              relief=tk.FLAT, padx=12, pady=2, cursor="hand2")
         copy_btn.pack(side=tk.RIGHT, padx=4)
-        tk.Button(toolbar, text="导出Excel",
-                  command=lambda: self._export_to_excel_v2(uid, rows),
-                  bg=_COLOR_BILI_BLUE, fg="white", font=_FONT_BODY,
-                  relief=tk.FLAT, padx=12, pady=2, cursor="hand2").pack(side=tk.RIGHT, padx=4)
-
         # 关键词过滤
+        filtered_rows = list(rows)
         filter_row = tk.Frame(win, bg=_COLOR_CARD)
         filter_row.pack(fill=tk.X, padx=8, pady=(0, 2))
         tk.Label(filter_row, text="关键词:", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT)
-        filter_entry = tk.Entry(filter_row, font=_FONT_BODY, width=25)
+        filter_var = tk.StringVar()
+        filter_entry = tk.Entry(filter_row, textvariable=filter_var, font=_FONT_BODY, width=25)
         filter_entry.pack(side=tk.LEFT, padx=6)
         filter_count_var = tk.StringVar(value=f"显示 {len(rows)} 条")
         tk.Label(filter_row, textvariable=filter_count_var, font=("Microsoft YaHei", 9),
@@ -1037,28 +1113,42 @@ class BiliSpiderGUI:
         tk.Button(filter_row, text="清除", command=lambda: self._clear_filter(tree, rows, filter_entry, filter_count_var),
                   font=("Microsoft YaHei", 8), relief=tk.FLAT, padx=8, cursor="hand2").pack(side=tk.LEFT)
 
-        # 填充数据
-        for r in rows:
+        tk.Button(toolbar, text="导出Excel",
+                  command=lambda: self._export_to_excel_v2(uid, list(filtered_rows)),
+                  bg=_COLOR_BILI_BLUE, fg="white", font=_FONT_BODY,
+                  relief=tk.FLAT, padx=12, pady=2, cursor="hand2").pack(side=tk.RIGHT, padx=4)
+
+        def _row_search_text(r: dict) -> str:
+            level = self._comment_level(r)
+            parts = (
+                r.get("source", ""),
+                level,
+                r.get("oid", ""),
+                r.get("rpid", ""),
+                r.get("message", ""),
+            )
+            return " ".join(str(part) for part in parts).casefold()
+
+        def _insert_row(r: dict) -> None:
             ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["ctime"]))
-            level = "二级" if r["parent"] > 0 else "一级"
+            level = self._comment_level(r)
             msg = str(r["message"]).replace("\n", " ")[:120]
             tree.insert("", tk.END, values=(ts, r["source"], level, r["oid"], r["rpid"], msg))
 
-        # 绑定关键词过滤
+        # 填充数据
+        for r in rows:
+            _insert_row(r)
+
         def _apply_filter(*_args):
-            keyword = filter_entry.get().strip().lower()
+            keyword = filter_var.get().strip().casefold()
             tree.delete(*tree.get_children())
-            count = 0
+            filtered_rows.clear()
             for r in rows:
-                msg = str(r["message"]).lower()
-                if not keyword or keyword in msg:
-                    ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["ctime"]))
-                    level = "二级" if r["parent"] > 0 else "一级"
-                    tree.insert("", tk.END, values=(
-                        ts, r["source"], level, r["oid"], r["rpid"],
-                        str(r["message"]).replace("\n", " ")[:120]))
-                    count += 1
-            filter_count_var.set(f"显示 {count}/{len(rows)} 条")
+                if not keyword or keyword in _row_search_text(r):
+                    _insert_row(r)
+                    filtered_rows.append(r)
+            filter_count_var.set(f"显示 {len(filtered_rows)}/{len(rows)} 条")
+        filter_var.trace_add("write", _apply_filter)
         filter_entry.bind("<KeyRelease>", _apply_filter)
 
         # 双击打开视频
@@ -1080,7 +1170,7 @@ class BiliSpiderGUI:
         tree.delete(*tree.get_children())
         for r in rows:
             ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["ctime"]))
-            level = "二级" if r["parent"] > 0 else "一级"
+            level = self._comment_level(r)
             tree.insert("", tk.END, values=(
                 ts, r["source"], level, r["oid"], r["rpid"],
                 str(r["message"]).replace("\n", " ")[:120]))
@@ -1116,7 +1206,7 @@ class BiliSpiderGUI:
             for r in rows:
                 ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ctime"]))
                 ws.append([r["source"], r["rpid"], r["oid"], ts,
-                           "二级" if r["parent"] > 0 else "一级", str(r["message"])])
+                           self._comment_level(r), str(r["message"])])
             wb.save(filepath)
             messagebox.showinfo("导出成功", f"已保存到:\n{filepath}")
         except ImportError:
@@ -1129,7 +1219,7 @@ class BiliSpiderGUI:
                 for r in rows:
                     ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ctime"]))
                     w.writerow([r["source"], r["rpid"], r["oid"], ts,
-                                "二级" if r["parent"] > 0 else "一级", str(r["message"])])
+                                self._comment_level(r), str(r["message"])])
             messagebox.showinfo("导出成功", f"已保存为CSV:\n{filepath}")
 
     # ─── 数据协作逻辑 ───────────────────────────────────────────

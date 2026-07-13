@@ -249,6 +249,7 @@ def _exchange_refresh_token(session: requests.Session, refresh_token: str) -> No
 def qr_login(
     status_callback: StatusCallback = None,
     cancel_event: threading.Event | None = None,
+    show_terminal_qr: bool = True,
 ) -> bool:
     """
     执行扫码登录流程,登录成功后自动将 Cookie 保存到 data/cookies.json。
@@ -256,6 +257,7 @@ def qr_login(
     参数:
         status_callback: 可选的进度回调函数,接收状态描述字符串
         cancel_event: 可选的多线程取消事件,设置后中止登录
+        show_terminal_qr: 是否在终端打印 ASCII 二维码。GUI 调用时应关闭。
 
     返回:
         True 表示登录成功,False 表示登录失败或用户取消
@@ -286,18 +288,19 @@ def qr_login(
     _log("请使用哔哩哔哩手机 App 扫描下方二维码登录:")
     _log(f"二维码链接: {qrcode_url}")
 
-    # 尝试在终端打印 ASCII 二维码
-    try:
-        import qrcode  # type: ignore
+    if show_terminal_qr:
+        # 尝试在终端打印 ASCII 二维码
+        try:
+            import qrcode  # type: ignore
 
-        qr = qrcode.QRCode(border=2)
-        qr.add_data(qrcode_url)
-        qr.make(fit=True)
-        qr.print_ascii(invert=True)
-    except ImportError:
-        _log("(提示: 安装 qrcode[pil] 可在终端直接显示二维码图案)")
-    except Exception:
-        pass
+            qr = qrcode.QRCode(border=2)
+            qr.add_data(qrcode_url)
+            qr.make(fit=True)
+            qr.print_ascii(invert=True)
+        except ImportError:
+            _log("(提示: 安装 qrcode[pil] 可在终端直接显示二维码图案)")
+        except Exception:
+            pass
 
     # 向 GUI 调用方传递二维码 URL（供渲染图像用）
     if status_callback:
