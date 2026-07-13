@@ -1,7 +1,7 @@
-"""Repair crawl progress rows that were wrongly marked done after API truncation.
+"""Repair crawl progress rows affected by old root-comment truncation logic.
 
 This script only updates ``crawl_progress``. It does not delete comments, cookies,
-or datasets. Videos repaired by this script will be retried by the crawler.
+or datasets.
 """
 
 from __future__ import annotations
@@ -33,12 +33,23 @@ def main() -> None:
         default=_SUSPECT_DONE_MAX_ROOT,
         help="Rows with this many or fewer root comments are treated as suspect.",
     )
+    parser.add_argument(
+        "--skip-false-limited",
+        action="store_true",
+        help="Do not restore limited rows that already have enough root comments.",
+    )
     args = parser.parse_args()
 
     with CommentDatabase(args.db) as db:
-        repaired = db.repair_suspect_done_progress(max_root=args.max_root)
+        suspect_done = db.repair_suspect_done_progress(max_root=args.max_root)
+        false_limited = 0
+        if not args.skip_false_limited:
+            false_limited = db.repair_false_limited_progress(
+                min_root=args.max_root + 1,
+            )
 
-    print(f"Repaired {repaired} suspect done progress rows in {args.db}")
+    print(f"Repaired {suspect_done} suspect done progress rows in {args.db}")
+    print(f"Restored {false_limited} false limited progress rows in {args.db}")
 
 
 if __name__ == "__main__":

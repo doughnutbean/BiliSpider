@@ -84,7 +84,7 @@ _CURSOR_WBI_SUB_KEY = "02cd020b04d64aacad6b3a08d06f8eb0"
 # 与 ps 参数无关 (ps=20/50/100 均被忽略)。
 _CURSOR_PAGE_SIZE = 20  # 请求时仍用 20,服务器实际返回 <=3
 _CURSOR_MAX_EMPTY = 3   # 连续 N 页无新 rpid 时停止翻页
-_CURSOR_MODES = [2, 3]  # 2=按时间, 3=按热度 (采集两种排序以最大化去重后条数)
+_CURSOR_MODES = [2]  # 2=按时间。保持单一排序,避免热度排序造成大量重复和误判。
 
 # ─── 速率控制器 (自适应风控) ─────────────────────────────────────
 
@@ -643,6 +643,45 @@ class CommentDatabase:
                 )
         return len(rows)
 
+    def repair_false_limited_progress(self, min_root: int = _SUSPECT_DONE_MAX_ROOT + 1) -> int:
+        """
+        将因旧比例判定误标为 limited 的视频恢复为 done。
+
+        B站 cursor 的 all_count 可能包含子评论,一级评论数显著小于 all_count
+        并不代表截断。只要已有一级评论数超过游客态 0~3 条上限,就允许进入
+        子评论阶段。
+        """
+        rows = self.conn.execute(
+            """
+            SELECT p.oid, p.type, COUNT(c.rpid) AS root_count
+            FROM crawl_progress p
+            JOIN comments c
+              ON c.oid=p.oid AND c.type=p.type AND c.parent=0
+            WHERE p.status='limited'
+            GROUP BY p.oid, p.type
+            HAVING root_count >= ?
+            """,
+            (min_root,),
+        ).fetchall()
+        if not rows:
+            return 0
+
+        now = int(time.time())
+        with self.conn:
+            for oid, ctype, root_count in rows:
+                self.conn.execute(
+                    """
+                    UPDATE crawl_progress
+                    SET status='done',
+                        root_pages_done=1,
+                        last_crawl=?,
+                        total_root=?
+                    WHERE oid=? AND type=?
+                    """,
+                    (now, int(root_count or 0), oid, ctype),
+                )
+        return len(rows)
+
 
 # ─── 评论爬取引擎 ──────────────────────────────────────────────
 
@@ -1054,7 +1093,6 @@ class CommentCrawler:
             consecutive_empty = 0
             seen_offsets: set[str] = set()
             page_num = 1
-            mode_label = "time" if mode == 2 else "hot" if mode == 3 else str(mode)
             while consecutive_empty < _CURSOR_MAX_EMPTY:
                 if self._cancelled:
                     break
@@ -1068,14 +1106,13 @@ class CommentCrawler:
                     best_all_count = all_count
                 if not replies:
                     print(
-                        f"    aid={oid} 评论 {mode_label} p{page_num}: "
+                        f"    aid={oid} 评论 p{page_num}: "
                         f"获取 0 条 (累计 {len(existing_rpids)}/{best_all_count or '?'})"
                     )
                     break
                 now = int(time.time())
                 records = []
                 oldest_ctime = None
-                has_new = False
                 for r in replies:
                     rpid = r["rpid"]
                     if rpid in existing_rpids:
@@ -1094,12 +1131,11 @@ class CommentCrawler:
                         sub_count=r.get("rcount", 0),
                         crawl_time=now,
                     ))
-                    has_new = True
                 if records:
                     self.db.insert_comments_batch(records)
                     total_new += len(records)
                 print(
-                    f"    aid={oid} 评论 {mode_label} p{page_num}: "
+                    f"    aid={oid} 评论 p{page_num}: "
                     f"获取 {len(replies)} 条,新增 {len(records)} 条 "
                     f"(累计 {len(existing_rpids)}/{best_all_count or '?'})"
                 )
@@ -1108,7 +1144,7 @@ class CommentCrawler:
                 if not isinstance(next_offset, str):
                     next_offset = str(next_offset)
                 is_end = bool(cursor.get("is_end"))
-                if not next_offset or next_offset in seen_offsets or not has_new:
+                if not next_offset or next_offset in seen_offsets:
                     consecutive_empty += 1
                 else:
                     seen_offsets.add(next_offset)
@@ -1124,8 +1160,11 @@ class CommentCrawler:
         if not any_ok:
             raise RuntimeError("cursor API unavailable")
         known_root_count = len(existing_rpids)
+        # cursor.all_count can include child replies, so root comments are
+        # expected to be much fewer than all_count. Treat it as truncated only
+        # when the root list is still at the old guest/API cap size.
         truncated = (best_all_count >= _ROOT_TRUNCATION_MIN_TOTAL
-                     and known_root_count < best_all_count * 0.8)
+                     and known_root_count <= _SUSPECT_DONE_MAX_ROOT)
         return total_new, best_all_count, truncated
 
     def _crawl_root_fallback(self, oid: int, ctype: int) -> int:
