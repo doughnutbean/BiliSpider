@@ -1481,8 +1481,9 @@ class CommentCrawler:
             return None
 
         # 有增长,补抓增量页
-        page_num = (old_fetched // _PAGE_SIZE) + 1
+        page_num = max(1, old_fetched // _PAGE_SIZE)
         new_fetched = old_fetched
+        completed = False
         while True:
             if self._cancelled:
                 break
@@ -1494,6 +1495,7 @@ class CommentCrawler:
             sub_data = r.get("data") or {}
             sub_replies = sub_data.get("replies", [])
             if not sub_replies:
+                completed = True
                 break
 
             now = int(time.time())
@@ -1517,39 +1519,45 @@ class CommentCrawler:
                 ))
             if records:
                 self.db.insert_comments_batch(records)
-                new_fetched += len(records)
 
             progress = self.db.get_progress(oid, ctype)
             try:
                 sp = json.loads(progress["sub_progress"])
             except (json.JSONDecodeError, TypeError):
                 sp = {}
+            scanned = min(remote_sub_total, page_num * _PAGE_SIZE)
+            new_fetched = max(new_fetched, scanned)
             sp = self._write_sub_progress_entry(
                 str(root_rpid), new_fetched, 0, sp)
             self.db.upsert_progress(oid, ctype, sub_progress=json.dumps(sp))
 
             if (self._since_ts and oldest_ctime is not None
                     and oldest_ctime < self._since_ts):
+                completed = True
                 break
             if len(sub_replies) < _PAGE_SIZE:
+                completed = True
                 break
             self._delay()
             page_num += 1
 
         # 最终更新 checked_at
         progress = self.db.get_progress(oid, ctype)
+        if completed:
+            new_fetched = max(new_fetched, remote_sub_total)
         try:
             sp = json.loads(progress["sub_progress"])
         except (json.JSONDecodeError, TypeError):
             sp = {}
         sp = self._write_sub_progress_entry(
-            str(root_rpid), new_fetched, now_ts, sp)
+            str(root_rpid), new_fetched, now_ts if completed else 0, sp)
         self.db.upsert_progress(oid, ctype, sub_progress=json.dumps(sp))
         return new_fetched if new_fetched > old_fetched else None
 
     # ── 爬取子评论 ──
 
-    def crawl_sub_comments(self, oid: int, ctype: int = 1) -> int:
+    def crawl_sub_comments(self, oid: int, ctype: int = 1,
+                            allow_stale_recheck: bool = False) -> int:
         """
         爬取某评论区中所有有子评论的一级评论的子评论。
 
@@ -1588,16 +1596,21 @@ class CommentCrawler:
 
         total_crawled = 0
 
-        # ── 旧根评论复查阶段 ──
-        # 对已完成但超过 TTL 的根评论复查远端子评论是否增长
+        # ── 旧根评论复查阶段 (仅远端增长触发时执行) ──
         now_ts = int(time.time())
-        stale_candidates = []
-        for rpid, sc in rows:
-            fetched, checked_at = self._read_sub_progress_entry(str(rpid), sub_progress)
-            if fetched >= sc and checked_at > 0 and (now_ts - checked_at) >= _SUB_RECHECK_TTL:
-                stale_candidates.append((rpid, sc, fetched))
+        if not allow_stale_recheck:
+            print(
+                f"    aid={oid} 子评论复查: 未触发远端增量,跳过旧根复查"
+            )
+        else:
+            # 对已完成但超过 TTL 的根评论复查远端子评论是否增长
+            stale_candidates = []
+            for rpid, sc in rows:
+                fetched, checked_at = self._read_sub_progress_entry(str(rpid), sub_progress)
+                if fetched >= sc and (checked_at == 0 or (now_ts - checked_at) >= _SUB_RECHECK_TTL):
+                    stale_candidates.append((rpid, sc, fetched))
 
-        if stale_candidates:
+        if allow_stale_recheck and stale_candidates:
             # 按 sub_count DESC 排序,优先复查高子评根评论
             stale_candidates.sort(key=lambda x: -x[1])
             stale_candidates = stale_candidates[:_SUB_RECHECK_BUDGET]
@@ -1622,8 +1635,8 @@ class CommentCrawler:
                 print(
                     f"    aid={oid} 旧根复查完成: {rechecked_count} 个根评论有新增子评论"
                 )
-        else:
-            print(f"    aid={oid} 子评论复查: 无过期旧根评论候选,跳过")
+            else:
+                print(f"    aid={oid} 子评论复查: 无过期旧根评论候选,跳过")
 
         if pending == 0:
             print(f"    aid={oid} 子评论: {len(rows)} 条根评论均已爬完,跳过")
@@ -1645,6 +1658,7 @@ class CommentCrawler:
             fetched_before, _ = self._read_sub_progress_entry(root_rpid_str, sub_progress)
             start_page = (fetched_before // _PAGE_SIZE) + 1
             page_num = start_page
+            completed = False
 
             while True:
                 if self._cancelled:
@@ -1667,6 +1681,7 @@ class CommentCrawler:
 
                 sub_replies = result["data"].get("replies", [])
                 if not sub_replies:
+                    completed = True
                     break
 
                 now = int(time.time())
@@ -1693,6 +1708,7 @@ class CommentCrawler:
                 # 如果整页都早于截止时间,提前终止
                 if (self._since_ts and oldest_ctime is not None
                         and oldest_ctime < self._since_ts and not records):
+                    completed = True
                     break
 
                 self.db.insert_comments_batch(records)
@@ -1703,16 +1719,18 @@ class CommentCrawler:
                 self.db.upsert_progress(oid, ctype, sub_progress=json.dumps(sub_progress))
 
                 if len(sub_replies) < _PAGE_SIZE:
+                    completed = True
                     break  # 最后一页
 
                 self._delay()  # 统一速率控制
                 page_num += 1
 
             # 标记该根评论子评论完成
-            now_ts2 = int(time.time())
-            sub_progress = self._write_sub_progress_entry(
-                root_rpid_str, sub_count, now_ts2, sub_progress)
-            self.db.upsert_progress(oid, ctype, sub_progress=json.dumps(sub_progress))
+            if completed:
+                now_ts2 = int(time.time())
+                sub_progress = self._write_sub_progress_entry(
+                    root_rpid_str, sub_count, now_ts2, sub_progress)
+                self.db.upsert_progress(oid, ctype, sub_progress=json.dumps(sub_progress))
             # 根评论之间加延迟,避免子评论请求过于密集触发风控
             self._delay()
 
