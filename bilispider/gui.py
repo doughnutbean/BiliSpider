@@ -476,15 +476,20 @@ class BiliSpiderGUI:
         _btn_normal(toolbar, "数据库统计", self._collab_stats).pack(side=tk.LEFT, padx=2)
         _btn_normal(toolbar, "一键导出并发布(我专用)", self._collab_export_publish_remote).pack(side=tk.LEFT, padx=(10, 2))
 
-        _btn_normal(toolbar, "立即同步", self._remote_sync_manual).pack(side=tk.LEFT, padx=(10, 2))
+        sync_row = tk.Frame(self._collab_tab, bg=_COLOR_CARD)
+        sync_row.pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        _btn_normal(sync_row, "立即同步远端数据", self._remote_sync_manual).pack(side=tk.LEFT, padx=2)
         tk.Checkbutton(
-            toolbar,
+            sync_row,
             text="启动时自动同步",
             variable=self._remote_sync_enabled_var,
             command=self._remote_sync_toggle,
             bg=_COLOR_CARD,
             font=_FONT_SMALL,
-        ).pack(side=tk.LEFT, padx=2)
+        ).pack(side=tk.LEFT, padx=(8, 2))
+        tk.Label(sync_row, textvariable=self._remote_sync_status_var,
+                 font=_FONT_SMALL, bg=_COLOR_CARD, fg="#888").pack(side=tk.RIGHT, padx=6)
 
         param_row = tk.Frame(self._collab_tab, bg=_COLOR_CARD)
         param_row.pack(fill=tk.X, padx=8, pady=(2, 4))
@@ -502,9 +507,6 @@ class BiliSpiderGUI:
         tk.Label(param_row, text="贡献者:", font=_FONT_SMALL, bg=_COLOR_CARD).pack(side=tk.LEFT)
         self._collab_contributor_entry = tk.Entry(param_row, font=_FONT_SMALL, width=12)
         self._collab_contributor_entry.pack(side=tk.LEFT, padx=2)
-
-        tk.Label(param_row, textvariable=self._remote_sync_status_var,
-                 font=_FONT_SMALL, bg=_COLOR_CARD, fg="#888").pack(side=tk.RIGHT, padx=6)
 
         self._collab_result = scrolledtext.ScrolledText(
             self._collab_tab, font=_FONT_MONO, wrap=tk.WORD,
