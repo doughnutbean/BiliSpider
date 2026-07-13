@@ -146,6 +146,32 @@ python tools/report_dataset.py
 python -m py_compile bilispider/*.py tools/*.py gui.py login.py crawl_comments.py
 ```
 
+## Windows 单 EXE 安装包
+
+推荐的 Windows 分发方式是：先用 PyInstaller 构建稳定的 `onedir` GUI 程序，再用 Inno Setup 打成单个安装程序 EXE。
+
+```powershell
+.\packaging\build_windows.ps1 -Version 0.2.0
+```
+
+安装包输出到：
+
+```text
+release\BiliSpiderSetup-0.2.0.exe
+```
+
+运行时数据不会打进安装包。开发环境仍使用项目内 `data\` 目录；打包后的 EXE 会把 Cookie、配置、队列和 SQLite 数据库保存到：
+
+```text
+%APPDATA%\BiliSpider\data
+```
+
+如需调试或便携部署，可设置 `BILISPIDER_DATA_DIR` 覆盖数据目录。如确实需要额外生成一个安装后本体也是单文件的便携 EXE：
+
+```powershell
+.\packaging\build_windows.ps1 -Version 0.2.0 -PortableOneFile
+```
+
 ## 参考来源
 
 - [snozzz.cc - bilibili-spider](https://snozzz.cc/article/bilibili-spider)

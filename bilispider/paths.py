@@ -2,10 +2,28 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "data"
+
+
+def _default_data_dir() -> Path:
+    override = os.environ.get("BILISPIDER_DATA_DIR")
+    if override:
+        return Path(override).expanduser()
+
+    if getattr(sys, "frozen", False):
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return Path(appdata) / "BiliSpider" / "data"
+        return Path.home() / "AppData" / "Roaming" / "BiliSpider" / "data"
+
+    return PROJECT_ROOT / "data"
+
+
+DATA_DIR = _default_data_dir()
 
 COOKIES_PATH = DATA_DIR / "cookies.json"
 CONFIG_PATH = DATA_DIR / "config.json"
