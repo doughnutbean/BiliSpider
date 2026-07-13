@@ -41,6 +41,8 @@ The repository root should stay small. Stable launchers may live here:
 
 Do not add temporary `test_*.py`, `debug_*.py`, `analyze_*.py`, or `cdp_*.py` files to the root. Use `tmp/` or `tools/dev/` instead.
 
+Developer benchmarks, API probes, and repair scripts are not stable root entry points. Keep reusable ones under `tools/dev/` with descriptive names such as `benchmark.py` or `probe_comment_api.py`.
+
 ### `tools/`
 
 Put reusable command-line utilities here when they are meant for users or maintainers, for example:
@@ -59,6 +61,7 @@ Put developer-only but reusable diagnostics here. Good examples:
 - API compatibility probes
 - manifest rebuild helpers
 - controlled debug scripts that do not contain secrets
+- local benchmarks used by maintainers
 
 If the script is throwaway, use `tmp/` instead.
 
@@ -164,4 +167,3 @@ Only add a new top-level directory when none of the existing directories fit. If
 - what does not belong there
 - whether it is committed or generated
 - whether it can contain sensitive data
-

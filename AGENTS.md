@@ -14,6 +14,8 @@ Allowed root files are limited to:
 
 Root-level scratch files such as `test_*.py`, `analyze_*.py`, `cdp_*.py`, `debug_*.py`, temporary databases, and one-off reports are not allowed.
 
+Developer benchmarks and API probes also do not belong in the root. Put reusable ones in `tools/dev/`; put throwaway ones in `tmp/`.
+
 ## Where Files Belong
 
 Use this placement map:
@@ -38,6 +40,7 @@ Use this placement map:
 - If a test is intended to be kept, create a dedicated test layout first, for example `tests/test_*.py`.
 - If a script is only for one investigation, put it in `tmp/` and do not commit it.
 - If a diagnostic script is useful long term, put it in `tools/dev/` with a clear name and no embedded secrets.
+- Use descriptive probe names such as `probe_comment_api.py`; avoid generic `test_*.py` names outside a real test suite.
 
 ## Sensitive And Generated Files
 
@@ -69,4 +72,3 @@ Ask these questions:
 4. Does an existing directory already express its purpose?
 
 If the answer is unclear, prefer `tmp/` for scratch work or update `docs/PROJECT_STRUCTURE.md` when introducing a new stable directory.
-

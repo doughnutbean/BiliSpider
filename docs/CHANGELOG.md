@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.0
+
+- Prepared the Windows installer release as `BiliSpiderSetup-0.3.0.exe`.
+- Cleaned the repository layout so developer probes live under `tools/dev/` instead of the repository root or user-facing tools directory.
+- Removed local runtime configuration and machine-specific helper scripts from Git tracking.
+- Rechecked packaging, runtime-data boundaries, and local validation commands before release.
+
 ## v2 - 稳定协作版
 
 - 整理 Tkinter GUI 数据协作页，移除热修后残留的不可达旧逻辑。
@@ -15,3 +22,4 @@
 ## v1
 
 - 初始 GUI、登录、WBI 签名、用户信息查询、评论爬取和 SQLite 持久化能力。
+
