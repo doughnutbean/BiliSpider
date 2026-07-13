@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import sqlite3
 import sys
 import threading
@@ -924,25 +925,161 @@ class BiliSpiderGUI:
         local_c = len(local_rows); online_c = len(online_rows)
         self.root.after(0, lambda: self._search_count_var.set(f"本地{local_c} + 在线{online_c} = {len(merged)}条"))
         source_note = f"[本地{local_c}条 + 在线API{'新增'+str(online_c)+'条' if online_available else '不可用'}]"
-        self.root.after(0, lambda: self._show_search_results(uid, merged, source_note))
+        self.root.after(0, lambda: self._show_comment_table_v2(uid, merged, source_note))
 
-    def _show_search_results(self, uid: str, rows: list[dict], note: str) -> None:
-        """在检索标签页的 ScrolledText 中展示结果。"""
-        lines = [f"UID={uid} 的评论 ({len(rows)}条) {note}", "═" * 60, ""]
-        for r in rows[:200]:
+    def _show_comment_table_v2(self, uid: str, rows: list[dict], note: str) -> None:
+        """弹出融合结果表格窗口 (含来源列、关键词筛选、复制、导出)。"""
+        win = tk.Toplevel(self.root)
+        win.title(f"UID={uid} 的评论 ({len(rows)}条) {note}")
+        win.geometry("920x520")
+        win.configure(bg=_COLOR_CARD)
+
+        # 工具栏
+        toolbar = tk.Frame(win, bg=_COLOR_CARD)
+        toolbar.pack(fill=tk.X, padx=8, pady=(8, 4))
+        tk.Label(toolbar, text=f"共 {len(rows)} 条评论", font=_FONT_HEADING,
+                 bg=_COLOR_CARD).pack(side=tk.LEFT)
+        tk.Label(toolbar, text=note, font=("Microsoft YaHei", 8),
+                 bg=_COLOR_CARD, fg="#888").pack(side=tk.LEFT, padx=10)
+
+        # 表格（先创建，因为按钮需要引用 tree）
+        tree_frame = tk.Frame(win, bg=_COLOR_CARD)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
+        columns = ("time", "source", "level", "oid", "rpid", "text")
+        tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
+        tree.heading("time", text="时间"); tree.column("time", width=130)
+        tree.heading("source", text="来源"); tree.column("source", width=50)
+        tree.heading("level", text="层级"); tree.column("level", width=50)
+        tree.heading("oid", text="视频oid"); tree.column("oid", width=100)
+        tree.heading("rpid", text="rpid"); tree.column("rpid", width=100)
+        tree.heading("text", text="评论内容"); tree.column("text", width=400)
+
+        vsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+
+        # 工具栏按钮放在 tree 创建之后
+        copy_btn = tk.Button(toolbar, text="复制选中行",
+                             command=lambda: self._copy_selected_rows(tree),
+                             bg="#666", fg="white", font=_FONT_BODY,
+                             relief=tk.FLAT, padx=12, pady=2, cursor="hand2")
+        copy_btn.pack(side=tk.RIGHT, padx=4)
+        tk.Button(toolbar, text="导出Excel",
+                  command=lambda: self._export_to_excel_v2(uid, rows),
+                  bg=_COLOR_BILI_BLUE, fg="white", font=_FONT_BODY,
+                  relief=tk.FLAT, padx=12, pady=2, cursor="hand2").pack(side=tk.RIGHT, padx=4)
+
+        # 关键词过滤
+        filter_row = tk.Frame(win, bg=_COLOR_CARD)
+        filter_row.pack(fill=tk.X, padx=8, pady=(0, 2))
+        tk.Label(filter_row, text="关键词:", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT)
+        filter_entry = tk.Entry(filter_row, font=_FONT_BODY, width=25)
+        filter_entry.pack(side=tk.LEFT, padx=6)
+        filter_count_var = tk.StringVar(value=f"显示 {len(rows)} 条")
+        tk.Label(filter_row, textvariable=filter_count_var, font=("Microsoft YaHei", 9),
+                 bg=_COLOR_CARD, fg="#888").pack(side=tk.LEFT, padx=10)
+        tk.Button(filter_row, text="清除", command=lambda: self._clear_filter(tree, rows, filter_entry, filter_count_var),
+                  font=("Microsoft YaHei", 8), relief=tk.FLAT, padx=8, cursor="hand2").pack(side=tk.LEFT)
+
+        # 填充数据
+        for r in rows:
             ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["ctime"]))
             level = "二级" if r["parent"] > 0 else "一级"
-            msg = str(r["message"]).replace("\n", " ")[:100]
-            lines.append(f"[{ts}] [{r['source']}] [{level}] rpid={r['rpid']} oid={r['oid']}")
-            lines.append(f"  {msg}")
-            lines.append("")
-        if len(rows) > 200:
-            lines.append(f"... 还有 {len(rows) - 200} 条")
-        self._search_result.configure(state=tk.NORMAL)
-        self._search_result.delete("1.0", tk.END)
-        self._search_result.insert(tk.END, "\n".join(lines))
-        self._search_result.configure(state=tk.DISABLED)
+            msg = str(r["message"]).replace("\n", " ")[:120]
+            tree.insert("", tk.END, values=(ts, r["source"], level, r["oid"], r["rpid"], msg))
+
+        # 绑定关键词过滤
+        def _apply_filter(*_args):
+            keyword = filter_entry.get().strip().lower()
+            tree.delete(*tree.get_children())
+            count = 0
+            for r in rows:
+                msg = str(r["message"]).lower()
+                if not keyword or keyword in msg:
+                    ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["ctime"]))
+                    level = "二级" if r["parent"] > 0 else "一级"
+                    tree.insert("", tk.END, values=(
+                        ts, r["source"], level, r["oid"], r["rpid"],
+                        str(r["message"]).replace("\n", " ")[:120]))
+                    count += 1
+            filter_count_var.set(f"显示 {count}/{len(rows)} 条")
+        filter_entry.bind("<KeyRelease>", _apply_filter)
+
+        # 双击打开视频
+        def _on_double_click(event):
+            item = tree.selection()
+            if item:
+                values = tree.item(item[0], "values")
+                oid = values[3]
+                import webbrowser
+                webbrowser.open(f"https://www.bilibili.com/video/av{oid}")
+        tree.bind("<Double-1>", _on_double_click)
+
         self._set_status(f"检索完成: UID={uid}, {len(rows)} 条")
+
+    def _clear_filter(self, tree: ttk.Treeview, rows: list[dict],
+                      filter_entry: tk.Entry, count_var: tk.StringVar) -> None:
+        """清除关键词过滤，恢复全部行。"""
+        filter_entry.delete(0, tk.END)
+        tree.delete(*tree.get_children())
+        for r in rows:
+            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["ctime"]))
+            level = "二级" if r["parent"] > 0 else "一级"
+            tree.insert("", tk.END, values=(
+                ts, r["source"], level, r["oid"], r["rpid"],
+                str(r["message"]).replace("\n", " ")[:120]))
+        count_var.set(f"显示 {len(rows)} 条")
+
+    def _copy_selected_rows(self, tree: ttk.Treeview) -> None:
+        """复制 Treeview 选中行到剪贴板。"""
+        items = tree.selection()
+        if not items:
+            return
+        lines = []
+        for item in items:
+            vals = tree.item(item, "values")
+            lines.append(f"{vals[0]}\t{vals[1]}\t{vals[2]}\t{vals[3]}\t{vals[4]}\t{vals[5]}")
+        text = "\n".join(lines)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self._set_status(f"已复制 {len(items)} 行到剪贴板")
+
+    def _export_to_excel_v2(self, uid: str, rows: list[dict]) -> None:
+        """导出融合结果为 Excel（含来源列）。"""
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel文件", "*.xlsx")],
+            initialfile=f"{uid}_评论数据.xlsx")
+        if not filepath:
+            return
+        try:
+            import openpyxl
+            wb = openpyxl.Workbook(); ws = wb.active
+            ws.title = f"UID={uid}"
+            ws.append(["来源", "rpid", "视频oid", "时间", "层级", "评论内容"])
+            for r in rows:
+                ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ctime"]))
+                ws.append([r["source"], r["rpid"], r["oid"], ts,
+                           "二级" if r["parent"] > 0 else "一级", str(r["message"])])
+            wb.save(filepath)
+            messagebox.showinfo("导出成功", f"已保存到:\n{filepath}")
+        except ImportError:
+            # 回退到 CSV
+            filepath = filepath.replace(".xlsx", ".csv")
+            import csv
+            with open(filepath, "w", encoding="utf-8-sig", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["来源", "rpid", "视频oid", "时间", "层级", "评论内容"])
+                for r in rows:
+                    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ctime"]))
+                    w.writerow([r["source"], r["rpid"], r["oid"], ts,
+                                "二级" if r["parent"] > 0 else "一级", str(r["message"])])
+            messagebox.showinfo("导出成功", f"已保存为CSV:\n{filepath}")
 
     # ─── 数据协作逻辑 ───────────────────────────────────────────
 
