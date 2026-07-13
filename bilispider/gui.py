@@ -434,6 +434,41 @@ class BiliSpiderGUI:
     # ─── 标签3: 数据协作 (NEW) ─────────────────────────────────
 
     def _build_collab_tab(self) -> None:
+        """数据协作标签页：导出、导入、校验、统计和文件清理。"""
+        toolbar = tk.Frame(self._collab_tab, bg=_COLOR_CARD)
+        toolbar.pack(fill=tk.X, padx=8, pady=(8, 4))
+
+        _btn_primary(toolbar, "导出全部", lambda: self._collab_export(all_mode=True)).pack(side=tk.LEFT, padx=2)
+        _btn_primary(toolbar, "按UID导出", lambda: self._collab_export(all_mode=False)).pack(side=tk.LEFT, padx=2)
+        _btn_primary(toolbar, "拆分导出", self._collab_split_export).pack(side=tk.LEFT, padx=2)
+        _btn_normal(toolbar, "批量删除", self._collab_batch_delete).pack(side=tk.LEFT, padx=2)
+        _btn_normal(toolbar, "导入JSONL", self._collab_import).pack(side=tk.LEFT, padx=2)
+        _btn_normal(toolbar, "校验JSONL", self._collab_validate).pack(side=tk.LEFT, padx=2)
+        _btn_normal(toolbar, "数据库统计", self._collab_stats).pack(side=tk.LEFT, padx=2)
+
+        param_row = tk.Frame(self._collab_tab, bg=_COLOR_CARD)
+        param_row.pack(fill=tk.X, padx=8, pady=(2, 4))
+
+        tk.Label(param_row, text="UID:", font=_FONT_SMALL, bg=_COLOR_CARD).pack(side=tk.LEFT)
+        self._collab_uid_entry = tk.Entry(param_row, font=_FONT_SMALL, width=14)
+        self._collab_uid_entry.pack(side=tk.LEFT, padx=(2, 10))
+        self._collab_uid_entry.insert(0, "2")
+
+        tk.Label(param_row, text="导出目录:", font=_FONT_SMALL, bg=_COLOR_CARD).pack(side=tk.LEFT)
+        self._collab_dir_var = tk.StringVar(value="datasets")
+        tk.Entry(param_row, textvariable=self._collab_dir_var,
+                 font=_FONT_SMALL, width=16).pack(side=tk.LEFT, padx=(2, 10))
+
+        tk.Label(param_row, text="贡献者:", font=_FONT_SMALL, bg=_COLOR_CARD).pack(side=tk.LEFT)
+        self._collab_contributor_entry = tk.Entry(param_row, font=_FONT_SMALL, width=12)
+        self._collab_contributor_entry.pack(side=tk.LEFT, padx=2)
+
+        self._collab_result = scrolledtext.ScrolledText(
+            self._collab_tab, font=_FONT_MONO, wrap=tk.WORD,
+            state=tk.DISABLED, bg=_COLOR_CARD, relief=tk.FLAT,
+        )
+        self._collab_result.pack(fill=tk.BOTH, expand=True, padx=8, pady=(2, 6))
+        return
         """数据协作标签页：导出 / 导入 / 校验 / 统计。"""
         # 顶部按钮行
         toolbar = tk.Frame(self._collab_tab, bg=_COLOR_CARD)
@@ -879,6 +914,108 @@ class BiliSpiderGUI:
 
     def _do_search_comments(self, uid: str) -> None:
         import requests
+
+        db_path = str(COMMENTS_DB_PATH)
+        local_rows: list[dict] = []
+        if os.path.exists(db_path):
+            conn = sqlite3.connect(db_path)
+            rows = conn.execute(
+                "SELECT rpid, oid, ctime, message, parent FROM comments WHERE mid=? ORDER BY ctime DESC LIMIT 500",
+                (int(uid),),
+            ).fetchall()
+            conn.close()
+            for rpid, oid, ctime, msg, parent in rows:
+                local_rows.append({
+                    "rpid": rpid,
+                    "oid": oid,
+                    "ctime": ctime,
+                    "message": msg or "",
+                    "parent": parent,
+                    "source": "本地",
+                })
+
+        online_rows: list[dict] = []
+        online_state = {"status": "unavailable", "message": "未请求"}
+        try:
+            seen_rpids = {r["rpid"] for r in local_rows}
+            for pn in range(1, 6):
+                resp = requests.get(
+                    "https://api.aicu.cc/api/v3/search/getreply",
+                    params={"uid": uid, "pn": pn, "ps": 100, "mode": 0},
+                    timeout=8,
+                )
+                if resp.status_code == 502:
+                    online_state = {"status": "unavailable", "message": "HTTP 502"}
+                    break
+                if resp.status_code != 200:
+                    online_state = {"status": "unavailable", "message": f"HTTP {resp.status_code}"}
+                    break
+                try:
+                    data = resp.json()
+                except Exception:
+                    online_state = {"status": "error", "message": "在线 API 返回非 JSON"}
+                    break
+                if data.get("code") != 0:
+                    online_state = {
+                        "status": "error",
+                        "message": f"code={data.get('code')}: {data.get('message', 'unknown')}",
+                    }
+                    break
+                replies = data.get("data", {}).get("replies", [])
+                if not replies:
+                    online_state = {"status": "empty", "message": "在线 API 无数据"}
+                    break
+                online_state = {"status": "available", "message": f"第 {pn} 页可用"}
+                for r in replies:
+                    rpid = r.get("rpid")
+                    if rpid not in seen_rpids:
+                        seen_rpids.add(rpid)
+                        online_rows.append({
+                            "rpid": rpid,
+                            "oid": r.get("oid", 0),
+                            "ctime": r.get("ctime", 0),
+                            "message": r.get("message", "") or "",
+                            "parent": r.get("parent", 0),
+                            "source": "在线",
+                        })
+                if data.get("data", {}).get("cursor", {}).get("is_end"):
+                    break
+                time.sleep(0.3)
+        except requests.exceptions.Timeout:
+            online_state = {"status": "unavailable", "message": "请求超时"}
+        except requests.exceptions.RequestException as exc:
+            online_state = {"status": "error", "message": str(exc)}
+        except Exception as exc:
+            online_state = {"status": "error", "message": str(exc)}
+
+        merged = local_rows + online_rows
+        merged.sort(key=lambda x: x["ctime"], reverse=True)
+        local_c = len(local_rows)
+        online_c = len(online_rows)
+
+        if not merged:
+            if online_state["status"] == "empty":
+                summary = "未找到评论，本地 0 条，在线 API 无数据"
+            else:
+                summary = f"未找到评论，本地 0 条，在线 API 不可用：{online_state['message']}"
+            self.root.after(0, lambda: self._search_count_var.set(summary))
+            self.root.after(0, lambda: self._set_status(summary))
+            return
+
+        if online_state["status"] == "available" and online_c > 0:
+            summary = f"本地 {local_c} 条 + 在线新增 {online_c} 条 = {len(merged)} 条"
+        elif online_state["status"] == "available":
+            summary = f"本地 {local_c} 条 = {len(merged)} 条"
+        elif online_state["status"] == "empty":
+            summary = f"本地 {local_c} 条 = {len(merged)} 条 | 在线 API 无数据"
+        else:
+            summary = f"本地 {local_c} 条 = {len(merged)} 条 | 在线 API 不可用：{online_state['message']}"
+
+        self.root.after(0, lambda: self._search_count_var.set(summary))
+        self.root.after(0, lambda: self._set_status(summary))
+        self.root.after(0, lambda: self._show_comment_table_v2(uid, merged, summary))
+        return
+        import requests
         # 本地 DB
         db_path = str(COMMENTS_DB_PATH)
         local_rows: list[dict] = []
@@ -1135,7 +1272,207 @@ class BiliSpiderGUI:
 
         threading.Thread(target=_run, daemon=True).start()
 
+    def _ask_split_mode(self) -> str | None:
+        """Return 'uid', 'oid', or None when the split export dialog is cancelled."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("拆分导出")
+        dialog.configure(bg=_COLOR_CARD)
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+
+        result = tk.StringVar(value="")
+
+        def choose(value: str | None) -> None:
+            result.set(value or "")
+            dialog.destroy()
+
+        tk.Label(
+            dialog,
+            text="选择拆分方式",
+            font=_FONT_HEADING,
+            bg=_COLOR_CARD,
+            fg="#333",
+        ).pack(padx=24, pady=(18, 6))
+        tk.Label(
+            dialog,
+            text="取消或关闭窗口不会开始导出。",
+            font=_FONT_SMALL,
+            bg=_COLOR_CARD,
+            fg="#777",
+        ).pack(padx=24, pady=(0, 14))
+
+        btn_row = tk.Frame(dialog, bg=_COLOR_CARD)
+        btn_row.pack(padx=18, pady=(0, 18))
+        _btn_primary(btn_row, "按 UID 拆分", lambda: choose("uid")).pack(side=tk.LEFT, padx=4)
+        _btn_primary(btn_row, "按 OID 拆分", lambda: choose("oid")).pack(side=tk.LEFT, padx=4)
+        _btn_normal(btn_row, "取消", lambda: choose(None)).pack(side=tk.LEFT, padx=4)
+
+        dialog.protocol("WM_DELETE_WINDOW", lambda: choose(None))
+        dialog.bind("<Escape>", lambda _e: choose(None))
+        dialog.update_idletasks()
+        x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - dialog.winfo_width()) // 2)
+        y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - dialog.winfo_height()) // 2)
+        dialog.geometry(f"+{x}+{y}")
+        dialog.grab_set()
+        dialog.wait_window()
+        value = result.get()
+        return value if value in {"uid", "oid"} else None
+
+    def _format_file_size(self, size: int) -> str:
+        units = ("B", "KB", "MB", "GB")
+        value = float(size)
+        for unit in units:
+            if value < 1024 or unit == units[-1]:
+                return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+            value /= 1024
+        return f"{size} B"
+
+    def _scan_dataset_files(self, directory: str | Path) -> list[dict]:
+        base = Path(directory)
+        if not base.exists() or not base.is_dir():
+            return []
+        files: list[dict] = []
+        for path in sorted(base.glob("*.jsonl"), key=lambda p: p.name.lower()):
+            if not path.is_file():
+                continue
+            stat = path.stat()
+            files.append({
+                "path": path,
+                "name": path.name,
+                "size": stat.st_size,
+                "mtime": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            })
+        return files
+
+    def _collab_batch_delete(self) -> None:
+        """Delete selected JSONL files from the current dataset directory."""
+        directory = Path(self._collab_dir_var.get().strip() or "datasets")
+        win = tk.Toplevel(self.root)
+        win.title(f"批量删除 JSONL - {directory}")
+        win.geometry("760x480")
+        win.configure(bg=_COLOR_CARD)
+        win.transient(self.root)
+
+        top = tk.Frame(win, bg=_COLOR_CARD)
+        top.pack(fill=tk.X, padx=10, pady=(10, 6))
+        info_var = tk.StringVar(value="")
+        tk.Label(top, textvariable=info_var, font=_FONT_BODY, bg=_COLOR_CARD, fg="#555").pack(side=tk.LEFT)
+
+        tree_frame = tk.Frame(win, bg=_COLOR_CARD)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 6))
+        columns = ("name", "size", "mtime")
+        tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
+        tree.heading("name", text="文件名")
+        tree.heading("size", text="大小")
+        tree.heading("mtime", text="修改时间")
+        tree.column("name", width=430)
+        tree.column("size", width=90, anchor=tk.E)
+        tree.column("mtime", width=160)
+        vsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+
+        file_map: dict[str, Path] = {}
+
+        def refresh() -> None:
+            tree.delete(*tree.get_children())
+            file_map.clear()
+            files = self._scan_dataset_files(directory)
+            total_size = sum(item["size"] for item in files)
+            info_var.set(f"{directory} | {len(files)} 个 JSONL | {self._format_file_size(total_size)}")
+            for item in files:
+                iid = str(item["path"])
+                file_map[iid] = item["path"]
+                tree.insert("", tk.END, iid=iid, values=(
+                    item["name"], self._format_file_size(item["size"]), item["mtime"],
+                ))
+
+        def select_all() -> None:
+            tree.selection_set(tree.get_children())
+
+        def invert_selection() -> None:
+            selected = set(tree.selection())
+            for iid in tree.get_children():
+                if iid in selected:
+                    tree.selection_remove(iid)
+                else:
+                    tree.selection_add(iid)
+
+        def delete_selected() -> None:
+            selected = list(tree.selection())
+            if not selected:
+                messagebox.showinfo("批量删除", "请先选择要删除的 JSONL 文件。", parent=win)
+                return
+            paths = [file_map[iid] for iid in selected if iid in file_map]
+            total_size = sum(path.stat().st_size for path in paths if path.exists())
+            ok = messagebox.askyesno(
+                "确认删除",
+                f"将删除 {len(paths)} 个 JSONL 文件，合计 {self._format_file_size(total_size)}。\n"
+                "只会删除当前目录下选中的 .jsonl 文件，不会删除数据库或目录。\n\n确认继续？",
+                parent=win,
+            )
+            if not ok:
+                return
+            deleted = 0
+            errors: list[str] = []
+            for path in paths:
+                try:
+                    if path.suffix.lower() != ".jsonl" or not path.is_file():
+                        continue
+                    path.unlink()
+                    deleted += 1
+                except Exception as exc:
+                    errors.append(f"{path.name}: {exc}")
+            refresh()
+            text = f"批量删除完成: {deleted} 个文件, {self._format_file_size(total_size)}\n"
+            if errors:
+                text += "错误:\n" + "\n".join(f"  {err}" for err in errors[:10]) + "\n"
+            self._collab_append_result(text)
+
+        btn_row = tk.Frame(win, bg=_COLOR_CARD)
+        btn_row.pack(fill=tk.X, padx=10, pady=(0, 10))
+        _btn_normal(btn_row, "全选", select_all).pack(side=tk.LEFT, padx=2)
+        _btn_normal(btn_row, "反选", invert_selection).pack(side=tk.LEFT, padx=2)
+        _btn_normal(btn_row, "刷新", refresh).pack(side=tk.LEFT, padx=2)
+        tk.Button(
+            btn_row, text="删除选中", command=delete_selected,
+            bg="#e74c3c", fg="white", font=_FONT_BODY,
+            cursor="hand2", relief=tk.FLAT, padx=12, pady=3,
+        ).pack(side=tk.LEFT, padx=2)
+        _btn_normal(btn_row, "关闭", win.destroy).pack(side=tk.RIGHT, padx=2)
+
+        refresh()
+
     def _collab_split_export(self) -> None:
+        """拆分导出，支持取消、Esc 和右上角关闭。"""
+        split_by = self._ask_split_mode()
+        if split_by is None:
+            return
+        out_dir = self._collab_dir_var.get().strip() or "datasets"
+
+        self._collab_clear_result()
+        self._collab_append_result(f"正在按 {split_by.upper()} 拆分导出到 {out_dir}/ ...\n")
+        self._set_status("正在拆分导出...")
+
+        def _run():
+            result = ds_export(split_by=split_by, out_dir=out_dir)
+            if result["success"]:
+                text = (f"拆分导出完成: {result['exported']} 条评论, {len(result['outputs'])} 个文件\n"
+                        f"   覆盖 UID: {len(result['uids'])} | 覆盖 OID: {len(result['oids'])}\n")
+                for p in result["outputs"][:5]:
+                    text += f"   - {p.name}\n"
+                if len(result["outputs"]) > 5:
+                    text += f"   ... 还有 {len(result['outputs']) - 5} 个\n"
+            else:
+                text = f"导出失败: {result['error']}\n"
+            self.root.after(0, lambda: self._collab_append_result(text))
+            self.root.after(0, lambda: self._set_status("拆分导出完成"))
+
+        threading.Thread(target=_run, daemon=True).start()
+        return
         """拆分导出（选 split_by 模式）。"""
         choice = messagebox.askquestion("拆分导出", "按 UID 拆分？\n选择「是」按 UID 拆分，选择「否」按 OID 拆分。")
         if choice is None or choice == "":

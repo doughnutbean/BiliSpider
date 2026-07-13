@@ -1,13 +1,16 @@
 {
-  "query_uid": "523347986",
-  "crawl_uid": "523347986",
+  "query_uid": "3546753139739589",
+  "crawl_uid": "3546753139739589",
   "crawl_days": "0",
   "crawl_max": "200",
   "proxy": "",
-  "search_uid": "523347986",
+  "search_uid": "3546753139739589",
   "rate_base": "1.5",
   "rate_jitter": "1",
   "snooze": "10",
   "auto_tune": false,
-  "auto_snooze": true
+  "auto_snooze": true,
+  "collab_uid": "3546753139739589",
+  "collab_dir": "datasets",
+  "contributor": ""
 }
