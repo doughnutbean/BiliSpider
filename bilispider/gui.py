@@ -468,43 +468,6 @@ class BiliSpiderGUI:
             state=tk.DISABLED, bg=_COLOR_CARD, relief=tk.FLAT,
         )
         self._collab_result.pack(fill=tk.BOTH, expand=True, padx=8, pady=(2, 6))
-        return
-        """数据协作标签页：导出 / 导入 / 校验 / 统计。"""
-        # 顶部按钮行
-        toolbar = tk.Frame(self._collab_tab, bg=_COLOR_CARD)
-        toolbar.pack(fill=tk.X, padx=8, pady=(8, 4))
-
-        _btn_primary(toolbar, "📤 导出全部", lambda: self._collab_export(all_mode=True)).pack(side=tk.LEFT, padx=2)
-        _btn_primary(toolbar, "📤 按UID导出", lambda: self._collab_export(all_mode=False)).pack(side=tk.LEFT, padx=2)
-        _btn_primary(toolbar, "📤 拆分导出", self._collab_split_export).pack(side=tk.LEFT, padx=2)
-        _btn_normal(toolbar, "📥 导入JSONL", self._collab_import).pack(side=tk.LEFT, padx=2)
-        _btn_normal(toolbar, "🔍 校验JSONL", self._collab_validate).pack(side=tk.LEFT, padx=2)
-        _btn_normal(toolbar, "📊 数据库统计", self._collab_stats).pack(side=tk.LEFT, padx=2)
-
-        # 参数行
-        param_row = tk.Frame(self._collab_tab, bg=_COLOR_CARD)
-        param_row.pack(fill=tk.X, padx=8, pady=(2, 4))
-
-        tk.Label(param_row, text="UID:", font=_FONT_SMALL, bg=_COLOR_CARD).pack(side=tk.LEFT)
-        self._collab_uid_entry = tk.Entry(param_row, font=_FONT_SMALL, width=14)
-        self._collab_uid_entry.pack(side=tk.LEFT, padx=(2, 10))
-        self._collab_uid_entry.insert(0, "2")
-
-        tk.Label(param_row, text="导出目录:", font=_FONT_SMALL, bg=_COLOR_CARD).pack(side=tk.LEFT)
-        self._collab_dir_var = tk.StringVar(value="datasets")
-        tk.Entry(param_row, textvariable=self._collab_dir_var,
-                 font=_FONT_SMALL, width=16).pack(side=tk.LEFT, padx=(2, 10))
-
-        tk.Label(param_row, text="贡献者:", font=_FONT_SMALL, bg=_COLOR_CARD).pack(side=tk.LEFT)
-        self._collab_contributor_entry = tk.Entry(param_row, font=_FONT_SMALL, width=12)
-        self._collab_contributor_entry.pack(side=tk.LEFT, padx=2)
-
-        # 结果区
-        self._collab_result = scrolledtext.ScrolledText(
-            self._collab_tab, font=_FONT_MONO, wrap=tk.WORD,
-            state=tk.DISABLED, bg=_COLOR_CARD, relief=tk.FLAT,
-        )
-        self._collab_result.pack(fill=tk.BOTH, expand=True, padx=8, pady=(2, 6))
 
     # ─── 标签4: 本地检索 ───────────────────────────────────────
 
@@ -1014,55 +977,6 @@ class BiliSpiderGUI:
         self.root.after(0, lambda: self._search_count_var.set(summary))
         self.root.after(0, lambda: self._set_status(summary))
         self.root.after(0, lambda: self._show_comment_table_v2(uid, merged, summary))
-        return
-        import requests
-        # 本地 DB
-        db_path = str(COMMENTS_DB_PATH)
-        local_rows: list[dict] = []
-        if os.path.exists(db_path):
-            conn = sqlite3.connect(db_path)
-            rows = conn.execute(
-                "SELECT rpid,oid,ctime,message,parent FROM comments WHERE mid=? ORDER BY ctime DESC LIMIT 500",
-                (int(uid),)).fetchall()
-            conn.close()
-            for rpid, oid, ctime, msg, parent in rows:
-                local_rows.append({"rpid": rpid, "oid": oid, "ctime": ctime,
-                                    "message": msg, "parent": parent, "source": "本地"})
-
-        # 在线 API
-        online_rows: list[dict] = []
-        online_available = False
-        try:
-            seen_rpids = {r["rpid"] for r in local_rows}
-            for pn in range(1, 6):
-                resp = requests.get("https://api.aicu.cc/api/v3/search/getreply",
-                                    params={"uid": uid, "pn": pn, "ps": 100, "mode": 0}, timeout=8)
-                if resp.status_code == 502: break
-                data = resp.json()
-                if data.get("code") != 0: break
-                replies = data.get("data", {}).get("replies", [])
-                if not replies: break
-                online_available = True
-                for r in replies:
-                    rpid = r.get("rpid")
-                    if rpid not in seen_rpids:
-                        seen_rpids.add(rpid)
-                        online_rows.append({"rpid": rpid, "oid": r.get("oid", 0),
-                                            "ctime": r.get("ctime", 0), "message": r.get("message", ""),
-                                            "parent": r.get("parent", 0), "source": "在线"})
-                if data.get("data", {}).get("cursor", {}).get("is_end"): break
-                time.sleep(0.3)
-        except Exception: pass
-
-        merged = local_rows + online_rows
-        merged.sort(key=lambda x: x["ctime"], reverse=True)
-        if not merged:
-            self.root.after(0, lambda: self._search_count_var.set(f"未找到 UID={uid} 的评论"))
-            return
-        local_c = len(local_rows); online_c = len(online_rows)
-        self.root.after(0, lambda: self._search_count_var.set(f"本地{local_c} + 在线{online_c} = {len(merged)}条"))
-        source_note = f"[本地{local_c}条 + 在线API{'新增'+str(online_c)+'条' if online_available else '不可用'}]"
-        self.root.after(0, lambda: self._show_comment_table_v2(uid, merged, source_note))
 
     def _show_comment_table_v2(self, uid: str, rows: list[dict], note: str) -> None:
         """弹出融合结果表格窗口 (含来源列、关键词筛选、复制、导出)。"""
@@ -1347,6 +1261,10 @@ class BiliSpiderGUI:
     def _collab_batch_delete(self) -> None:
         """Delete selected JSONL files from the current dataset directory."""
         directory = Path(self._collab_dir_var.get().strip() or "datasets")
+        try:
+            safe_directory = directory.resolve(strict=False)
+        except OSError:
+            safe_directory = directory.absolute()
         win = tk.Toplevel(self.root)
         win.title(f"批量删除 JSONL - {directory}")
         win.geometry("760x480")
@@ -1406,7 +1324,17 @@ class BiliSpiderGUI:
             if not selected:
                 messagebox.showinfo("批量删除", "请先选择要删除的 JSONL 文件。", parent=win)
                 return
-            paths = [file_map[iid] for iid in selected if iid in file_map]
+            paths = []
+            for iid in selected:
+                path = file_map.get(iid)
+                if path is None:
+                    continue
+                try:
+                    resolved = path.resolve(strict=False)
+                except OSError:
+                    continue
+                if resolved.parent == safe_directory and resolved.suffix.lower() == ".jsonl":
+                    paths.append(path)
             total_size = sum(path.stat().st_size for path in paths if path.exists())
             ok = messagebox.askyesno(
                 "确认删除",
@@ -1420,7 +1348,12 @@ class BiliSpiderGUI:
             errors: list[str] = []
             for path in paths:
                 try:
-                    if path.suffix.lower() != ".jsonl" or not path.is_file():
+                    resolved = path.resolve(strict=False)
+                    if (
+                        resolved.parent != safe_directory
+                        or path.suffix.lower() != ".jsonl"
+                        or not path.is_file()
+                    ):
                         continue
                     path.unlink()
                     deleted += 1
@@ -1468,33 +1401,6 @@ class BiliSpiderGUI:
                     text += f"   ... 还有 {len(result['outputs']) - 5} 个\n"
             else:
                 text = f"导出失败: {result['error']}\n"
-            self.root.after(0, lambda: self._collab_append_result(text))
-            self.root.after(0, lambda: self._set_status("拆分导出完成"))
-
-        threading.Thread(target=_run, daemon=True).start()
-        return
-        """拆分导出（选 split_by 模式）。"""
-        choice = messagebox.askquestion("拆分导出", "按 UID 拆分？\n选择「是」按 UID 拆分，选择「否」按 OID 拆分。")
-        if choice is None or choice == "":
-            return
-        split_by = "uid" if choice == "yes" else "oid"
-        out_dir = self._collab_dir_var.get().strip() or "datasets"
-
-        self._collab_clear_result()
-        self._collab_append_result(f"📤 正在按 {split_by.upper()} 拆分导出到 {out_dir}/ ...\n")
-        self._set_status("正在拆分导出...")
-
-        def _run():
-            result = ds_export(split_by=split_by, out_dir=out_dir)
-            if result["success"]:
-                text = (f"✅ 拆分导出完成: {result['exported']} 条评论, {len(result['outputs'])} 个文件\n"
-                        f"   覆盖 UID: {len(result['uids'])} | 覆盖 OID: {len(result['oids'])}\n")
-                for p in result["outputs"][:5]:
-                    text += f"   - {p.name}\n"
-                if len(result["outputs"]) > 5:
-                    text += f"   ... 还有 {len(result['outputs']) - 5} 个\n"
-            else:
-                text = f"❌ 导出失败: {result['error']}\n"
             self.root.after(0, lambda: self._collab_append_result(text))
             self.root.after(0, lambda: self._set_status("拆分导出完成"))
 

@@ -1,71 +1,27 @@
 # BiliSpider
 
-BiliSpider 是一个基于 Python 的 B 站数据查询与评论爬取实验项目，包含扫码登录、WBI 签名、用户信息查询、视频列表查询、评论爬取、SQLite 持久化和 Tkinter 图形界面。
+BiliSpider 是一个面向学习和个人研究的 B 站数据查询、评论爬取和数据协作工具。v2 的目标是稳定协作：Tkinter GUI 保持轻量，SQLite 只留在本地，团队通过 `datasets/*.jsonl` 共享可校验的数据集。
 
-> 请仅将本项目用于学习、课程实验或个人研究。批量请求 B 站接口可能触发风控，请控制频率和范围。
+请控制请求频率和爬取范围，不要把本项目用于高频批量请求或违反平台规则的用途。
 
 ## 功能概览
 
-- 扫码登录并保存 Cookie
-- 查询当前登录账号信息
-- 通过 UID 查询用户主页信息和视频列表
-- 按 UID 批量爬取 UP 主视频评论
-- 支持一级评论、二级评论、断点续爬和本地去重
-- GUI 支持查询、爬取、队列、速率控制、本地评论检索和导出
-- 使用 JSONL 数据集进行多人协作，避免直接合并 SQLite 数据库
-
-## 项目结构
-
-```text
-bilispider/
-├── bilispider/                 # 核心包
-│   ├── comment_crawler.py      # 评论爬取、速率控制、SQLite 存储
-│   ├── gui.py                  # Tkinter GUI 主界面
-│   ├── login.py                # 扫码登录与 Cookie 管理
-│   ├── paths.py                # 项目路径与 data 目录管理
-│   ├── proxy_pool.py           # 代理池
-│   └── wbi.py                  # WBI 签名
-├── data/                       # 本地运行数据，不提交数据库和 Cookie
-├── datasets/                   # 可提交的 JSONL 评论数据集
-├── docs/reference/             # 参考资料
-├── examples/                   # 示例查询脚本
-├── tools/                      # 数据导入导出、校验和检查工具
-├── benchmark.py                # 爬取稳定性基准测试
-├── crawl_comments.py           # 命令行评论爬取入口
-├── gui.py                      # GUI 启动入口
-├── login.py                    # 命令行扫码登录入口
-└── requirements.txt
-```
+- 扫码登录并保存本地 Cookie。
+- 查询当前账号、指定 UID 的主页信息和视频列表。
+- 按 UID 爬取 UP 主视频评论，支持一级/二级评论、断点续爬、本地去重和队列。
+- GUI 提供查询、评论爬取、数据协作、本地检索四个标签页。
+- 数据协作统一使用 JSONL，配合 manifest 做提交前检查。
+- 本地检索会融合 `data/comments.db` 和在线 API：本地有数据、在线可用、在线不可用都会显示明确状态。
 
 ## 快速开始
 
-安装依赖：
-
 ```bash
 pip install -r requirements.txt
-```
-
-扫码登录：
-
-```bash
 python login.py
-```
-
-启动 GUI：
-
-```bash
 python gui.py
 ```
 
-运行示例查询：
-
-```bash
-python examples/get_my_info.py
-python examples/get_user_info.py
-python examples/get_user_videos.py
-```
-
-命令行爬取评论：
+命令行爬取示例：
 
 ```bash
 python crawl_comments.py 2 --days 30 --max-videos 5
@@ -79,120 +35,116 @@ python crawl_comments.py 2 --days 30 --max-videos 5
 | `--since YYYY-MM-DD` | 只爬指定日期之后 |
 | `--until YYYY-MM-DD` | 只爬指定日期之前 |
 | `--max-videos N` | 最多处理 N 个视频，`0` 表示不限 |
-| `--proxy URL` | 指定代理，可重复传入多个代理轮换 |
+| `--proxy URL` | 指定代理，可重复传入多个代理 |
+
+## GUI v2
+
+GUI 入口：
+
+```bash
+python gui.py
+```
+
+四个标签页：
+
+| 标签页 | 用途 |
+| --- | --- |
+| 账号/查询 | 登录状态、账号信息、UID 信息和视频列表查询 |
+| 评论爬取 | 输入 UID 后开始/停止爬取，管理队列、速率、日志和进度 |
+| 数据协作 | 导出全部、按 UID 导出、拆分导出、导入 JSONL、校验 JSONL、查看数据库统计、批量删除 |
+| 本地检索 | 按 UID 搜索评论，合并本地数据库与在线 API 结果并标记来源 |
+
+数据协作页的批量删除只扫描当前目录一层的 `.jsonl` 文件，不递归，不会删除目录、数据库、`manifest.json` 或 `.gitkeep`。删除前必须手动选择并确认。
 
 ## 本地数据
 
-运行时数据统一放在 `data/`：
+运行态数据放在 `data/`，不要提交：
 
 | 文件 | 说明 |
 | --- | --- |
-| `data/cookies.json` | 登录 Cookie，包含敏感信息 |
-| `data/config.json` | GUI 最近一次配置 |
-| `data/crawl_queue.json` | GUI 待爬 UID 队列 |
+| `data/cookies.json` | 登录 Cookie，包含敏感凭据 |
+| `data/config.json` | GUI 本地配置 |
+| `data/crawl_queue.json` | GUI 待爬队列 |
 | `data/comments.db` | SQLite 评论数据库 |
 
-不要提交 `data/comments.db`、`data/cookies.json`、WAL 文件或队列文件。多人协作统一提交 `datasets/*.jsonl`。
+协作时只提交 JSONL 数据集和 `datasets/manifest.json`。不要提交 SQLite、Cookie、WAL/SHM 文件或本地配置。
 
-## 数据协作流程
+## 数据协作格式
 
-推荐数据集命名：
+推荐两种贡献方式：
 
-- `datasets/comments_uid_<uid>.jsonl`
-- `datasets/comments_oid_<oid>.jsonl`
-- `datasets/comments_all_<YYYY-MM-DD>.jsonl`
+1. 单文件快照：`datasets/comments_all_YYYY-MM-DD.jsonl`
+2. 拆分目录：`datasets/by_uid/comments_uid_<uid>.jsonl` 或 `datasets/by_oid/comments_oid_<oid>.jsonl`
 
-导出本地全部评论：
+JSONL 每行是一条评论记录，导入时按 `(rpid, oid, type)` 自动去重。
+
+导出全部：
 
 ```bash
 python tools/export_comments.py --out datasets/comments_all_2026-07-13.jsonl --pretty-summary
 ```
 
-按 UID 或 OID 导出：
+按 UID/OID 导出：
 
 ```bash
 python tools/export_comments.py --uid 2 --out datasets/comments_uid_2.jsonl --pretty-summary
 python tools/export_comments.py --oid 123456 --out datasets/comments_oid_123456.jsonl --pretty-summary
 ```
 
-拆分成多个小文件，适合提交较大的本地数据：
+拆分导出：
 
 ```bash
 python tools/export_comments.py --split-by uid --out-dir datasets/by_uid --pretty-summary
 python tools/export_comments.py --split-by oid --out-dir datasets/by_oid --pretty-summary
 ```
 
-调试时只导出少量数据：
-
-```bash
-python tools/export_comments.py --limit 100 --out datasets/comments_sample.jsonl --pretty-summary
-```
-
-提交前校验数据集：
-
-```bash
-python tools/validate_dataset.py datasets/*.jsonl
-```
-
-导入别人提交的数据：
+导入别人贡献的数据：
 
 ```bash
 python tools/import_comments.py datasets/*.jsonl
 ```
 
-在 PowerShell 中也可以直接使用 `datasets/*.jsonl`，导入脚本会自行展开通配符。导入时按 `(rpid, oid, type)` 自动去重，重复导入不会产生重复数据。
+PowerShell 不展开通配符时，导入脚本会自行展开 `datasets/*.jsonl`。
 
-完整贡献流程：
+## v2 推荐工作流
 
 ```bash
+python login.py
 python crawl_comments.py 2 --days 30 --max-videos 5
-python tools/export_comments.py --uid 2 --out datasets/comments_uid_2.jsonl --pretty-summary
-python tools/validate_dataset.py datasets/comments_uid_2.jsonl
-git add datasets/comments_uid_2.jsonl
-git commit -m "Add comments dataset for uid 2"
+python tools/export_comments.py --out datasets/comments_all_2026-07-13.jsonl --pretty-summary
+python tools/prepare_dataset.py datasets/*.jsonl --update-manifest --check-manifest
+git add datasets/comments_all_2026-07-13.jsonl datasets/manifest.json
+git commit -m "data: add comments snapshot 2026-07-13"
+```
+
+提交前统一检查入口：
+
+```bash
+python tools/prepare_dataset.py datasets/*.jsonl --check-manifest
+```
+
+当新增、删除或重命名数据集后，重新生成 manifest：
+
+```bash
+python tools/prepare_dataset.py datasets/**/*.jsonl --update-manifest --check-manifest
 ```
 
 ## 数据质量工具
 
-查看本地数据库统计：
-
 ```bash
+python tools/validate_dataset.py datasets/*.jsonl
 python tools/db_stats.py
-```
-
-查看表结构并验证去重：
-
-```bash
 python tools/check_db.py
+python tools/report_dataset.py
 ```
 
-JSONL 校验会检查：
+`prepare_dataset.py` 覆盖 JSONL 校验、重复主键检查、manifest 一致性、大文件提醒和命名规范。`tools/dev/rebuild_manifest.py` 仅作为维护脚本保留，日常请优先使用 `prepare_dataset.py --update-manifest`。
 
-- 必需字段是否完整
-- JSON 是否合法
-- 是否存在空行
-- `(rpid, oid, type)` 是否重复
-- 文件名是否符合推荐规范
-- 文件是否过大，过大时建议使用 `--split-by`
-
-## 数据库表
-
-| 表 | 说明 |
-| --- | --- |
-| `comments` | 评论明细，包含 rpid、oid、mid、parent、root、ctime、message、like_count、crawl_time |
-| `crawl_progress` | 断点续爬进度，记录视频维度的爬取状态 |
-
-数据库使用 SQLite WAL 模式，并通过 `INSERT OR IGNORE` 对评论去重。
-
-## 基准测试
+## 静态检查
 
 ```bash
-python benchmark.py quick
-python benchmark.py medium
-python benchmark.py overnight
+python -m py_compile bilispider/*.py tools/*.py gui.py login.py crawl_comments.py
 ```
-
-三种模式分别用于短测、中测和长时间稳定性测试。测试会记录请求量、成功率、风控次数和评论入库量。
 
 ## 参考来源
 

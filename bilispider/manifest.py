@@ -116,12 +116,12 @@ def remove_file_entry(manifest: dict[str, Any], filename: str) -> bool:
 # ── 目录扫描 ──────────────────────────────────────────
 
 def scan_datasets_dir() -> list[Path]:
-    """扫描 datasets/ 目录，返回所有 .jsonl 文件的排序列表（排除 manifest.json）。"""
+    """扫描 datasets/ 目录，返回所有 .jsonl 文件的排序列表。"""
     if not DATASETS_DIR.exists():
         return []
     return sorted(
-        p for p in DATASETS_DIR.iterdir()
-        if p.suffix == ".jsonl" and p.name != "manifest.json"
+        p for p in DATASETS_DIR.rglob("*.jsonl")
+        if p.is_file() and p.name != "manifest.json"
     )
 
 

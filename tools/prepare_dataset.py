@@ -1,15 +1,8 @@
-"""提交前自动检查 JSONL 数据集。
+"""Pre-commit checks for BiliSpider JSONL datasets.
 
-检查项:
-  1. JSONL 格式校验（合法 JSON、必需字段、字段类型）
-  2. 主键 (rpid, oid, type) 重复检查
-  3. 文件命名规范检查
-  4. 大文件提醒（默认 >50MB）
-  5. 数据统计摘要
-
-用法:
-  python tools/prepare_dataset.py datasets/*.jsonl
-  python tools/prepare_dataset.py datasets/comments_all.jsonl --max-mb 30
+This is the single entry point before committing data. It validates JSONL
+records, checks duplicate primary keys, warns about large files and naming
+drift, and can verify or regenerate datasets/manifest.json.
 """
 
 from __future__ import annotations
@@ -21,7 +14,6 @@ import re
 from pathlib import Path
 import sys
 
-# 修复 Windows 控制台 GBK 编码问题，确保 emoji 正常输出
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -30,10 +22,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from bilispider.manifest import (
-    scan_jsonl_stats, load_manifest, scan_datasets_dir, DATASETS_DIR,
+    DATASETS_DIR,
+    aggregate_stats,
+    load_manifest,
+    save_manifest,
+    scan_jsonl_stats,
+    update_file_entry,
 )
-
-# ── 常量 ──────────────────────────────────────────────
 
 COMMENT_COLUMNS = (
     "rpid", "oid", "type", "mid", "parent", "root",
@@ -45,251 +40,285 @@ INTEGER_COLUMNS = {
     "ctime", "like_count", "sub_count", "crawl_time",
 }
 
-# 推荐的文件命名模式
-_NAME_PATTERNS = (
+NAME_PATTERNS = (
+    re.compile(r"^comments_all_\d{4}-\d{2}-\d{2}\.jsonl$"),
     re.compile(r"^comments_uid_\d+\.jsonl$"),
     re.compile(r"^comments_oid_\d+\.jsonl$"),
-    re.compile(r"^comments_all_\d{4}-\d{2}-\d{2}\.jsonl$"),
     re.compile(r"^comments_all\.jsonl$"),
 )
 
-_NAME_PATTERN_DESC = (
+NAME_PATTERN_DESC = (
+    "comments_all_<YYYY-MM-DD>.jsonl",
     "comments_uid_<uid>.jsonl",
     "comments_oid_<oid>.jsonl",
-    "comments_all_<YYYY-MM-DD>.jsonl",
     "comments_all.jsonl",
 )
 
 
-# ── 参数解析 ──────────────────────────────────────────
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="提交前检查 JSONL 数据集：格式校验、去重检查、命名规范、统计摘要。"
+        description=(
+            "Validate JSONL datasets, check manifest consistency, and optionally "
+            "regenerate datasets/manifest.json."
+        )
     )
     parser.add_argument(
-        "files", nargs="*",
-        help="JSONL 文件或 glob 模式（默认 datasets/*.jsonl）。",
+        "files",
+        nargs="*",
+        help="JSONL files or glob patterns. Defaults to datasets/**/*.jsonl.",
     )
     parser.add_argument(
-        "--max-mb", type=int, default=50,
-        help="超过此大小（MB）的文件会触发警告（默认 50）。",
+        "--max-mb",
+        type=int,
+        default=50,
+        help="Warn when a JSONL file is larger than this size in MB. Default: 50.",
     )
     parser.add_argument(
-        "--no-name-check", action="store_true",
-        help="跳过文件命名规范检查。",
+        "--no-name-check",
+        action="store_true",
+        help="Skip recommended file naming checks.",
     )
     parser.add_argument(
-        "--check-manifest", action="store_true",
-        help="额外校验 datasets/manifest.json 与磁盘文件的一致性。",
+        "--check-manifest",
+        action="store_true",
+        help="Verify datasets/manifest.json against the selected files.",
+    )
+    parser.add_argument(
+        "--update-manifest",
+        action="store_true",
+        help="Regenerate datasets/manifest.json from the selected files after validation.",
+    )
+    parser.add_argument(
+        "--contributor",
+        default="",
+        help="Contributor name used when --update-manifest writes entries.",
     )
     return parser.parse_args()
 
 
-# ── 文件展开 ──────────────────────────────────────────
+def _glob(pattern: str) -> list[Path]:
+    return sorted(Path(match) for match in glob.glob(pattern, recursive=True))
+
 
 def expand_files(patterns: list[str]) -> list[Path]:
-    """展开 glob 模式，去重，返回排序后的 Path 列表。"""
     if not patterns:
-        patterns = ["datasets/*.jsonl"]
+        patterns = ["datasets/**/*.jsonl"]
     files: list[Path] = []
     seen: set[Path] = set()
     for pattern in patterns:
-        matches = sorted(Path(m) for m in glob.glob(pattern))
+        matches = _glob(pattern)
         if not matches:
             path = Path(pattern)
             if path.exists():
                 matches = [path]
             else:
-                print(f"[SKIP] 未找到匹配文件: {pattern}")
+                print(f"[SKIP] Dataset not found: {pattern}")
                 continue
         for path in matches:
+            if path.name == "manifest.json" or not path.is_file():
+                continue
             resolved = path.resolve()
-            if resolved not in seen and path.name != "manifest.json":
+            if resolved not in seen:
                 files.append(path)
                 seen.add(resolved)
     return files
 
 
-# ── 命名检查 ──────────────────────────────────────────
+def dataset_key(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(DATASETS_DIR.resolve()).as_posix()
+    except ValueError:
+        return path.as_posix()
+
 
 def check_name(path: Path) -> str | None:
-    """检查文件名是否符合推荐规范；返回警告消息或 None。"""
-    if any(pat.match(path.name) for pat in _NAME_PATTERNS):
+    if any(pattern.match(path.name) for pattern in NAME_PATTERNS):
         return None
     return (
-        f"文件名不符合推荐规范: {path.name}\n"
-        f"  推荐格式: {', '.join(_NAME_PATTERN_DESC)}"
+        f"{path.name}: name does not match recommended formats: "
+        f"{', '.join(NAME_PATTERN_DESC)}"
     )
 
 
-# ── 记录校验 ──────────────────────────────────────────
-
 def validate_record(record: object, path: Path, line_no: int) -> list[str]:
-    """校验单条 JSON 记录；返回错误消息列表。"""
-    errors: list[str] = []
     prefix = f"{path}:{line_no}"
-
     if not isinstance(record, dict):
-        return [f"{prefix} JSON 值必须是对象，实际类型: {type(record).__name__}"]
+        return [f"{prefix} JSON value must be an object"]
 
-    missing = [col for col in COMMENT_COLUMNS if col not in record]
+    errors: list[str] = []
+    missing = [field for field in COMMENT_COLUMNS if field not in record]
     if missing:
-        errors.append(f"{prefix} 缺少字段: {', '.join(missing)}")
+        errors.append(f"{prefix} missing fields: {', '.join(missing)}")
 
-    for col in INTEGER_COLUMNS:
-        if col in record and record[col] is not None and not isinstance(record[col], int):
-            errors.append(f"{prefix} 字段 {col} 必须是整数，实际类型: {type(record[col]).__name__}")
+    for field in INTEGER_COLUMNS:
+        if field in record and record[field] is not None and not isinstance(record[field], int):
+            errors.append(f"{prefix} field {field} must be an integer")
 
     if "message" in record and record["message"] is not None and not isinstance(record["message"], str):
-        errors.append(f"{prefix} 字段 message 必须是字符串或 null")
+        errors.append(f"{prefix} field message must be a string or null")
 
     return errors
 
 
-# ── Manifest 一致性检查 ───────────────────────────────
-
-def check_manifest_consistency(
-    disk_files: list[Path],
-) -> tuple[list[str], list[str]]:
-    """校验 manifest.json 与 datasets/ 目录下实际文件的一致性。
-
-    返回 (errors, warnings)。
-    - error: 磁盘上有文件但 manifest 中缺失；manifest 中有条目但文件不存在
-    - warning: manifest 中的统计信息可能过期（文件修改时间晚于 export_time）
-    """
+def check_manifest_consistency(files: list[Path]) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
     manifest = load_manifest()
     manifest_files = set(manifest.get("files", {}).keys())
-    disk_names = {p.name for p in disk_files}
+    disk_files = {dataset_key(path) for path in files}
 
-    # 磁盘有但 manifest 没有
-    missing_in_manifest = disk_names - manifest_files
-    for name in sorted(missing_in_manifest):
-        errors.append(f"manifest.json 中缺少条目: {name}（文件存在于磁盘但未登记）")
+    for name in sorted(disk_files - manifest_files):
+        errors.append(f"manifest.json is missing entry: {name}")
 
-    # manifest 有但磁盘没有
-    missing_on_disk = manifest_files - disk_names
-    for name in sorted(missing_on_disk):
-        errors.append(f"manifest.json 中有孤立条目: {name}（条目存在但文件已删除）")
+    for name in sorted(manifest_files - disk_files):
+        errors.append(f"manifest.json has stale entry: {name}")
 
-    # 检查统计信息是否过期
-    for name in sorted(manifest_files & disk_names):
+    for name in sorted(manifest_files & disk_files):
         entry = manifest["files"][name]
         filepath = DATASETS_DIR / name
+        if not filepath.exists():
+            continue
         actual_size = filepath.stat().st_size
         recorded_size = entry.get("size_bytes", 0)
-        # 允许 1% 的误差（文件可能在行尾有细微差异）
-        if recorded_size > 0 and abs(actual_size - recorded_size) / max(actual_size, 1) > 0.01:
+        if recorded_size and recorded_size != actual_size:
             warnings.append(
-                f"{name}: manifest 记录大小 {recorded_size} 与实际大小 {actual_size} 不一致，"
-                f"建议重新运行 contribute_dataset.py"
+                f"{name}: manifest size {recorded_size} differs from actual size {actual_size}; "
+                "run --update-manifest."
             )
 
     return errors, warnings
 
 
-# ── 主逻辑 ────────────────────────────────────────────
+def validate_files(
+    files: list[Path],
+    *,
+    max_mb: int,
+    check_names: bool,
+) -> tuple[list[str], list[str], dict[str, dict], int, dict[tuple[int, int, int], str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    file_stats: dict[str, dict] = {}
+    seen_keys: dict[tuple[int, int, int], str] = {}
+    total_rows = 0
+
+    for path in files:
+        size_mb = path.stat().st_size / (1024 * 1024)
+        if size_mb > max_mb:
+            warnings.append(
+                f"{dataset_key(path)}: {size_mb:.1f} MB exceeds {max_mb} MB; "
+                "prefer comments_all_<date>.jsonl for a single release snapshot or split by UID/OID directory."
+            )
+
+        if check_names:
+            name_warning = check_name(path)
+            if name_warning:
+                warnings.append(f"{dataset_key(path)}: {name_warning}")
+
+        stats = scan_jsonl_stats(path)
+        file_stats[dataset_key(path)] = stats
+        errors.extend(stats["errors"])
+
+        with path.open("r", encoding="utf-8-sig") as fh:
+            for line_no, raw_line in enumerate(fh, 1):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                record_errors = validate_record(record, path, line_no)
+                errors.extend(record_errors)
+                if record_errors:
+                    continue
+
+                total_rows += 1
+                key = (int(record["rpid"]), int(record["oid"]), int(record["type"]))
+                location = f"{dataset_key(path)}:{line_no}"
+                if key in seen_keys:
+                    errors.append(f"{location} duplicate primary key {key}; first seen at {seen_keys[key]}")
+                else:
+                    seen_keys[key] = location
+
+    return errors, warnings, file_stats, total_rows, seen_keys
+
+
+def update_manifest(files: list[Path], file_stats: dict[str, dict], contributor: str) -> None:
+    manifest = {
+        "version": load_manifest().get("version", "1"),
+        "last_updated": "",
+        "files": {},
+    }
+    for path in files:
+        key = dataset_key(path)
+        stats = file_stats[key]
+        update_file_entry(
+            manifest,
+            key,
+            comments=stats["comments"],
+            unique_uids=stats["unique_uids"],
+            unique_oids=stats["unique_oids"],
+            contributor=contributor,
+            filepath=path,
+        )
+    save_manifest(manifest)
+
 
 def main() -> None:
     args = parse_args()
     files = expand_files(args.files)
 
     if not files:
-        print("没有找到需要检查的 JSONL 文件。")
-        print("提示: 将 .jsonl 文件放在 datasets/ 目录下，或通过命令行参数指定路径。")
+        print("No JSONL dataset files found.")
+        print("Put files under datasets/ or pass explicit JSONL paths.")
         return
 
-    errors: list[str] = []
-    warnings: list[str] = []
-    seen_keys: dict[tuple[int, int, int], str] = {}
-    total_rows = 0
-    file_stats: dict[str, dict] = {}
+    errors, warnings, file_stats, total_rows, seen_keys = validate_files(
+        files,
+        max_mb=args.max_mb,
+        check_names=not args.no_name_check,
+    )
 
-    for path in files:
-        # ── 大文件提醒 ──
-        size_mb = path.stat().st_size / (1024 * 1024)
-        if size_mb > args.max_mb:
-            warnings.append(
-                f"{path.name}: 文件 {size_mb:.1f} MB，超过 {args.max_mb} MB。"
-                f" 建议用 --split-by uid 或 --split-by oid 拆分成小文件。"
-            )
-
-        # ── 命名检查 ──
-        if not args.no_name_check:
-            name_warn = check_name(path)
-            if name_warn:
-                warnings.append(f"{path.name}: {name_warn}")
-
-        # ── 逐行校验 ──
-        stats = scan_jsonl_stats(path)
-        file_stats[path.name] = stats
-        if stats["errors"]:
-            errors.extend(stats["errors"])
-
-        # ── 主键去重检查 ──
-        with path.open("r", encoding="utf-8-sig") as fh:
-            for line_no, line in enumerate(fh, 1):
-                line = line.strip()
-                if not line:
-                    # 空行已在 scan_jsonl_stats 中跳过，这里仅作防御
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue  # 已在 stats["errors"] 中记录
-                if not isinstance(record, dict):
-                    continue
-
-                total_rows += 1
-                key = (int(record["rpid"]), int(record["oid"]), int(record["type"]))
-                location = f"{path.name}:{line_no}"
-                if key in seen_keys:
-                    errors.append(f"{location} 主键重复 {key}；首次出现在 {seen_keys[key]}")
-                else:
-                    seen_keys[key] = location
-
-    # ── Manifest 一致性检查（在输出前执行，确保 manifest 警告也被打印）──
-    if args.check_manifest:
-        m_errors, m_warnings = check_manifest_consistency(files)
-        if m_errors:
-            errors.extend([f"[MANIFEST] {e}" for e in m_errors])
-        for w in m_warnings:
-            warnings.append(f"[MANIFEST] {w}")
-
-    # ── 输出警告 ──
-    for w in warnings:
-        print(f"⚠  [WARN]  {w}")
-
-    # ── 输出错误 ──
     if errors:
-        print(f"\n❌ 发现 {len(errors)} 个错误:\n")
-        for err in errors[:30]:
-            print(f"  [ERROR] {err}")
-        if len(errors) > 30:
-            print(f"  ... 还有 {len(errors) - 30} 个错误")
-        print()
-
-    # ── 统计摘要 ──
-    from bilispider.manifest import aggregate_stats
-    agg = aggregate_stats(file_stats)
-    print(f"{'='*50}")
-    print(f"  检查完成")
-    print(f"{'='*50}")
-    print(f"  文件数        : {len(files)}")
-    print(f"  有效记录数    : {total_rows}")
-    print(f"  唯一主键      : {len(seen_keys)}")
-    print(f"  覆盖 UID 数   : {agg['unique_uids']}")
-    print(f"  覆盖 OID 数   : {agg['unique_oids']}")
-    if errors:
-        print(f"  错误数        : {len(errors)} ❌")
-    else:
-        print(f"  错误数        : 0 ✅")
-
-    # ── 退出码 ──
-    if errors:
+        for warning in warnings:
+            print(f"[WARN] {warning}")
+        print(f"\nFound {len(errors)} error(s):\n")
+        for error in errors[:50]:
+            print(f"  [ERROR] {error}")
+        if len(errors) > 50:
+            print(f"  ... {len(errors) - 50} more")
         raise SystemExit(1)
+
+    if args.update_manifest:
+        update_manifest(files, file_stats, args.contributor)
+        print("Updated datasets/manifest.json")
+
+    if args.check_manifest:
+        manifest_errors, manifest_warnings = check_manifest_consistency(files)
+        errors.extend(f"[MANIFEST] {error}" for error in manifest_errors)
+        warnings.extend(f"[MANIFEST] {warning}" for warning in manifest_warnings)
+
+    for warning in warnings:
+        print(f"[WARN] {warning}")
+
+    if errors:
+        print(f"\nFound {len(errors)} error(s):\n")
+        for error in errors[:50]:
+            print(f"  [ERROR] {error}")
+        if len(errors) > 50:
+            print(f"  ... {len(errors) - 50} more")
+        raise SystemExit(1)
+
+    agg = aggregate_stats(file_stats)
+    print("=" * 50)
+    print("Dataset check passed")
+    print("=" * 50)
+    print(f"Files          : {len(files)}")
+    print(f"Valid rows     : {total_rows}")
+    print(f"Unique keys    : {len(seen_keys)}")
+    print(f"Unique UIDs    : {agg['unique_uids']}")
+    print(f"Unique OIDs    : {agg['unique_oids']}")
 
 
 if __name__ == "__main__":

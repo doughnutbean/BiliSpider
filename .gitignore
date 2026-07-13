@@ -20,9 +20,11 @@ Thumbs.db
 
 # Runtime and local secrets
 .env
+.deepseek/
 *cookie*
 !bilispider/cookie*
 data/cookies.json
+data/config.json
 data/crawl_queue.json
 data/*.db
 data/*.db-shm
@@ -31,3 +33,17 @@ data/*.db-wal
 *.db-shm
 *.db-wal
 _test_*.py
+test_*.py
+tmp/
+temp/
+*.tmp
+
+# Dataset scratch output
+datasets/tmp/
+datasets/temp/
+datasets/scratch/
+datasets/comments_sample*.jsonl
+datasets/test_*.jsonl
+
+#agents
+codewhale-直连.bat
