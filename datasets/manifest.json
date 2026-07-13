@@ -1,0 +1,15 @@
+{
+  "version": "1",
+  "last_updated": "2026-07-13T12:30:43",
+  "files": {
+    "comments_all.jsonl": {
+      "comments": 155530,
+      "unique_uids": 66869,
+      "unique_oids": 70,
+      "export_time": "2026-07-13T12:28:07",
+      "contributor": "团队",
+      "sha256": "13f344ded601c7baf4aab6f8f847843f7b47d75544f18ebd4fc63f006fbf982b",
+      "size_bytes": 45151755
+    }
+  }
+}
