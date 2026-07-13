@@ -12,8 +12,8 @@
 
 用法:
     from bilispider.wordcloud_utils import generate_wordcloud
-    img_bytes = generate_wordcloud(rows)       # 返回 PNG 的 bytes
-    generate_wordcloud(rows, save_path)         # 保存到文件
+    img_bytes, msg, top_words = generate_wordcloud(rows)
+    generate_wordcloud(rows, save_path)         # 同时保存到文件
 """
 from __future__ import annotations
 
@@ -21,7 +21,10 @@ import os
 import re
 import sys
 from io import BytesIO
+from pathlib import Path
 from typing import Optional
+
+from .paths import DATA_DIR, ensure_data_dir
 
 # ─── 可选依赖检查 ─────────────────────────────────────────────
 
@@ -129,6 +132,74 @@ _DEFAULT_STOP_WORDS: set[str] = {
     "哈哈哈哈", "hhhh",
 }
 
+USER_STOPWORDS_PATH = DATA_DIR / "wordcloud_stopwords.txt"
+
+
+def normalize_stop_words(words: list[str] | set[str] | tuple[str, ...] | str) -> list[str]:
+    """规范化停用词: 去空白、去重,并保持首次出现顺序。"""
+    if isinstance(words, str):
+        raw_words = words.splitlines()
+    else:
+        raw_words = list(words)
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for word in raw_words:
+        item = str(word).strip()
+        if not item or item.startswith("#"):
+            continue
+        if item in seen:
+            continue
+        seen.add(item)
+        normalized.append(item)
+    return normalized
+
+
+def load_user_stop_words(path: Path | None = None) -> set[str]:
+    """读取用户停用词文件。文件不存在时返回空集合。"""
+    stop_path = path or USER_STOPWORDS_PATH
+    if not stop_path.exists():
+        return set()
+    text = stop_path.read_text(encoding="utf-8-sig")
+    return set(normalize_stop_words(text))
+
+
+def save_user_stop_words(words: list[str] | set[str] | tuple[str, ...] | str,
+                         path: Path | None = None) -> list[str]:
+    """保存用户停用词文件,返回规范化后的词列表。"""
+    stop_path = path or USER_STOPWORDS_PATH
+    ensure_data_dir()
+    normalized = normalize_stop_words(words)
+    stop_path.write_text("\n".join(normalized) + ("\n" if normalized else ""),
+                         encoding="utf-8", newline="\n")
+    return normalized
+
+
+def add_user_stop_word(word: str, path: Path | None = None) -> list[str]:
+    """把单个词加入用户停用词文件,返回保存后的词列表。"""
+    stop_path = path or USER_STOPWORDS_PATH
+    words = load_user_stop_words(stop_path)
+    words.add(word)
+    return save_user_stop_words(words, stop_path)
+
+
+def clear_user_stop_words(path: Path | None = None) -> None:
+    """清空用户停用词文件。"""
+    stop_path = path or USER_STOPWORDS_PATH
+    ensure_data_dir()
+    stop_path.write_text("", encoding="utf-8", newline="\n")
+
+
+def build_stop_words(extra_stop_words: set[str] | None = None,
+                     include_user: bool = True) -> set[str]:
+    """合并内置、用户和本次额外停用词。"""
+    merged = set(_DEFAULT_STOP_WORDS)
+    if include_user:
+        merged.update(load_user_stop_words())
+    if extra_stop_words:
+        merged.update(normalize_stop_words(extra_stop_words))
+    return merged
+
 
 def _clean_text(text: str) -> Optional[str]:
     """清洗单条评论文本,返回清洗后的字符串或 None (无有效内容)。"""
@@ -172,11 +243,11 @@ def _tokenize(text: str, stop_words: set[str] | None = None) -> list[str]:
             continue
         if word.isspace():
             continue
+        # 首尾标点清理后仍有内容才保留
+        word = _PUNCT_STRIP_PATTERN.sub("", word)
         # 停用词过滤
         if word in stop_words:
             continue
-        # 首尾标点清理后仍有内容才保留
-        word = _PUNCT_STRIP_PATTERN.sub("", word)
         if len(word) >= 2:
             words.append(word)
     return words
@@ -192,7 +263,9 @@ def generate_wordcloud(
     max_words: int = 200,
     background_color: str = "white",
     stop_words: set[str] | None = None,
-) -> tuple[Optional[bytes], str]:
+    include_user_stop_words: bool = True,
+    top_n: int = 50,
+) -> tuple[Optional[bytes], str, list[tuple[str, int]]]:
     """
     从评论列表生成词云 PNG。
 
@@ -202,20 +275,27 @@ def generate_wordcloud(
         width, height: 图片尺寸
         max_words: 最大词汇数
         background_color: 背景色
-        stop_words: 自定义停用词集合 (None=默认)
+        stop_words: 本次额外停用词集合
+        include_user_stop_words: 是否合并用户停用词文件
+        top_n: 返回的高频词数量
 
     返回:
-        (PNG bytes 或 None, 状态消息)
+        (PNG bytes 或 None, 状态消息, 高频词列表)
     """
     # 依赖检查
     ok, err = _check_deps()
     if not ok:
-        return None, err
+        return None, err, []
 
     # 字体检查
     font_path = _find_chinese_font()
     if font_path is None:
-        return None, "未找到中文字体文件 (需要 Microsoft YaHei / SimHei 等)"
+        return None, "未找到中文字体文件 (需要 Microsoft YaHei / SimHei 等)", []
+
+    try:
+        final_stop_words = build_stop_words(stop_words, include_user_stop_words)
+    except Exception as e:
+        return None, f"读取停用词失败: {e}", []
 
     # 提取并清洗文本
     all_words: list[str] = []
@@ -224,19 +304,20 @@ def generate_wordcloud(
         cleaned = _clean_text(msg)
         if cleaned is None:
             continue
-        words = _tokenize(cleaned, stop_words)
+        words = _tokenize(cleaned, final_stop_words)
         all_words.extend(words)
 
     if not all_words:
-        return None, "当前结果没有可生成词云的有效词汇\n(评论可能都是纯数字、URL或表情)"
+        return None, "当前结果没有可生成词云的有效词汇\n(评论可能都是纯数字、URL或表情)", []
 
     # 词频统计
     freq: dict[str, int] = {}
     for w in all_words:
         freq[w] = freq.get(w, 0) + 1
+    top_words = sorted(freq.items(), key=lambda item: (-item[1], item[0]))[:top_n]
 
     if len(freq) < 3:
-        return None, f"有效词汇过少 (仅 {len(freq)} 个不同词),不适合生成词云"
+        return None, f"有效词汇过少 (仅 {len(freq)} 个不同词),不适合生成词云", top_words
 
     # 生成词云
     try:
@@ -263,7 +344,7 @@ def generate_wordcloud(
         if save_path:
             img.save(save_path, format="PNG")
 
-        return png_bytes, f"词云生成成功 ({len(freq)} 个词)"
+        return png_bytes, f"词云生成成功 ({len(freq)} 个词)", top_words
 
     except Exception as e:
-        return None, f"词云生成失败: {e}"
+        return None, f"词云生成失败: {e}", top_words

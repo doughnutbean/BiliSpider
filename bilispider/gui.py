@@ -32,7 +32,15 @@ from .login import (
     qr_login,
 )
 from .comment_crawler import CommentCrawler
-from .wordcloud_utils import generate_wordcloud
+from .wordcloud_utils import (
+    add_user_stop_word,
+    clear_user_stop_words,
+    generate_wordcloud,
+    load_user_stop_words,
+    normalize_stop_words,
+    save_user_stop_words,
+    USER_STOPWORDS_PATH,
+)
 from .dataset_tools import (
     export_comments as ds_export,
     import_jsonl as ds_import,
@@ -109,6 +117,7 @@ class BiliSpiderGUI:
         self._bench_runner = None
         self._current_crawl_uid: Optional[str] = None
         self._queue_continue = False
+        self._wordcloud_context: dict | None = None
 
         # UI 变量
         self._login_status_var = tk.StringVar(value="未登录")
@@ -1175,21 +1184,26 @@ class BiliSpiderGUI:
             messagebox.showinfo("词云", "当前没有可生成词云的数据", parent=self.root)
             return
 
+        self._wordcloud_context = {"uid": uid, "rows": list(rows)}
         self._set_status("正在生成词云...")
         import threading
 
         def _run():
             try:
-                png_bytes, msg = generate_wordcloud(rows)
+                png_bytes, msg, top_words = generate_wordcloud(rows)
             except Exception as e:
-                png_bytes, msg = None, f"词云生成异常: {e}"
-            self.root.after(0, lambda: self._show_wordcloud_preview(uid, png_bytes, msg))
+                png_bytes, msg, top_words = None, f"词云生成异常: {e}", []
+            self.root.after(
+                0,
+                lambda: self._show_wordcloud_preview(uid, list(rows), png_bytes, msg, top_words),
+            )
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
 
-    def _show_wordcloud_preview(self, uid: str, png_bytes: bytes | None,
-                                 msg: str) -> None:
+    def _show_wordcloud_preview(self, uid: str, rows: list[dict],
+                                 png_bytes: bytes | None, msg: str,
+                                 top_words: list[tuple[str, int]] | None = None) -> None:
         """显示词云预览窗口 (带保存按钮)。"""
         if png_bytes is None:
             self._set_status("词云: " + msg)
@@ -1199,24 +1213,157 @@ class BiliSpiderGUI:
         self._set_status(msg)
         win = tk.Toplevel(self.root)
         win.title(f"UID={uid} 词云")
-        win.geometry("1020x740")
-        win.configure(bg="white")
+        win.geometry("980x720")
+        win.minsize(720, 520)
+        win.configure(bg=_COLOR_CARD)
 
-        # 用 PIL 显示图片
-        from PIL import Image, ImageTk
         from io import BytesIO
-        img = Image.open(BytesIO(png_bytes))
-        photo = ImageTk.PhotoImage(img)
+        from PIL import Image, ImageTk
 
-        label = tk.Label(win, image=photo, bg="white")
-        label.image = photo  # 保持引用防止 GC
-        label.pack(fill=tk.BOTH, expand=True)
+        source_img = Image.open(BytesIO(png_bytes)).convert("RGB")
+        source_w, source_h = source_img.size
 
-        # 底部工具栏
-        bar = tk.Frame(win, bg="white")
-        bar.pack(fill=tk.X, padx=10, pady=(0, 10))
-        tk.Label(bar, text=msg, font=("Microsoft YaHei", 9),
-                 bg="white", fg="#888").pack(side=tk.LEFT)
+        # 顶部工具栏
+        bar = tk.Frame(win, bg=_COLOR_CARD)
+        bar.pack(fill=tk.X, padx=12, pady=(10, 8))
+        tk.Label(
+            bar,
+            text=f"词云预览  {source_w}x{source_h}",
+            font=_FONT_HEADING,
+            bg=_COLOR_CARD,
+            fg="#333",
+        ).pack(side=tk.LEFT)
+        scale_label = tk.Label(
+            bar,
+            text=msg,
+            font=("Microsoft YaHei", 9),
+            bg=_COLOR_CARD,
+            fg="#888",
+        )
+        scale_label.pack(side=tk.LEFT, padx=12)
+
+        body = tk.Frame(win, bg="#eef1f5")
+        body.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(2, weight=0, minsize=220)
+
+        canvas = tk.Canvas(
+            body,
+            bg="#f8fafc",
+            highlightthickness=1,
+            highlightbackground="#d7dde6",
+        )
+        vsb = ttk.Scrollbar(body, orient=tk.VERTICAL, command=canvas.yview)
+        hsb = ttk.Scrollbar(body, orient=tk.HORIZONTAL, command=canvas.xview)
+        canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+
+        words_panel = tk.Frame(body, bg="#f8fafc", width=220)
+        words_panel.grid(row=0, column=2, rowspan=2, sticky="nsew", padx=(10, 0))
+        words_panel.grid_propagate(False)
+        tk.Label(words_panel, text="高频词", font=_FONT_HEADING,
+                 bg="#f8fafc", fg="#333").pack(anchor=tk.W, padx=8, pady=(8, 4))
+        tk.Label(words_panel, text="双击或选中后点屏蔽",
+                 font=("Microsoft YaHei", 8), bg="#f8fafc", fg="#888").pack(anchor=tk.W, padx=8)
+
+        word_tree_frame = tk.Frame(words_panel, bg="#f8fafc")
+        word_tree_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        word_tree = ttk.Treeview(
+            word_tree_frame,
+            columns=("word", "count"),
+            show="headings",
+            selectmode="browse",
+            height=18,
+        )
+        word_tree.heading("word", text="词")
+        word_tree.heading("count", text="次数")
+        word_tree.column("word", width=120, anchor=tk.W)
+        word_tree.column("count", width=60, anchor=tk.E)
+        word_vsb = ttk.Scrollbar(word_tree_frame, orient=tk.VERTICAL, command=word_tree.yview)
+        word_tree.configure(yscrollcommand=word_vsb.set)
+        word_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        word_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        for word, count in (top_words or [])[:50]:
+            word_tree.insert("", tk.END, values=(word, count))
+
+        preview_state = {
+            "photo": None,
+            "scale": 1.0,
+            "fit": True,
+            "after_id": None,
+        }
+
+        def _resample_filter():
+            return getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+
+        def _render_preview() -> None:
+            canvas_w = max(canvas.winfo_width(), 1)
+            canvas_h = max(canvas.winfo_height(), 1)
+            padding = 24
+            if preview_state["fit"]:
+                fit_scale = min(
+                    1.0,
+                    max((canvas_w - padding * 2) / source_w, 0.05),
+                    max((canvas_h - padding * 2) / source_h, 0.05),
+                )
+                preview_state["scale"] = fit_scale
+
+            scale = float(preview_state["scale"])
+            draw_w = max(1, int(source_w * scale))
+            draw_h = max(1, int(source_h * scale))
+            if scale == 1.0:
+                display_img = source_img
+            else:
+                display_img = source_img.resize((draw_w, draw_h), _resample_filter())
+
+            photo = ImageTk.PhotoImage(display_img)
+            preview_state["photo"] = photo
+
+            canvas.delete("all")
+            x = max(padding, (canvas_w - draw_w) // 2)
+            y = max(padding, (canvas_h - draw_h) // 2)
+            canvas.create_image(x, y, image=photo, anchor=tk.NW)
+            canvas.configure(scrollregion=(0, 0, draw_w + padding * 2, draw_h + padding * 2))
+            scale_label.configure(text=f"{msg} · 缩放 {scale * 100:.0f}%")
+
+        def _schedule_render(_event=None) -> None:
+            after_id = preview_state.get("after_id")
+            if after_id:
+                win.after_cancel(after_id)
+            preview_state["after_id"] = win.after(80, _render_preview)
+
+        def _set_zoom(scale: float, fit: bool = False) -> None:
+            preview_state["fit"] = fit
+            if not fit:
+                preview_state["scale"] = max(0.1, min(scale, 2.0))
+            _render_preview()
+
+        def _zoom(delta: float) -> None:
+            _set_zoom(float(preview_state["scale"]) * delta, fit=False)
+
+        def _refresh_from_same_rows() -> None:
+            if win.winfo_exists():
+                win.destroy()
+            self._generate_wordcloud_thread(uid, rows)
+
+        def _open_editor() -> None:
+            self._open_wordcloud_stopwords_editor(uid, rows, win)
+
+        tk.Button(bar, text="适应窗口", command=lambda: _set_zoom(1.0, fit=True),
+                  bg="#666", fg="white", font=_FONT_BODY,
+                  relief=tk.FLAT, padx=12, pady=2, cursor="hand2").pack(side=tk.RIGHT, padx=4)
+        tk.Button(bar, text="100%", command=lambda: _set_zoom(1.0),
+                  bg="#666", fg="white", font=_FONT_BODY,
+                  relief=tk.FLAT, padx=10, pady=2, cursor="hand2").pack(side=tk.RIGHT, padx=4)
+        tk.Button(bar, text="+", command=lambda: _zoom(1.25),
+                  bg="#666", fg="white", font=_FONT_BODY,
+                  relief=tk.FLAT, padx=10, pady=2, cursor="hand2").pack(side=tk.RIGHT, padx=4)
+        tk.Button(bar, text="-", command=lambda: _zoom(0.8),
+                  bg="#666", fg="white", font=_FONT_BODY,
+                  relief=tk.FLAT, padx=10, pady=2, cursor="hand2").pack(side=tk.RIGHT, padx=4)
 
         def _save():
             default_name = f"uid_{uid}_wordcloud.png"
@@ -1235,7 +1382,150 @@ class BiliSpiderGUI:
 
         tk.Button(bar, text="保存PNG", command=_save,
                   bg="#8e44ad", fg="white", font=("Microsoft YaHei", 10),
-                  relief=tk.FLAT, padx=16, pady=4, cursor="hand2").pack(side=tk.RIGHT)
+                  relief=tk.FLAT, padx=16, pady=3, cursor="hand2").pack(side=tk.RIGHT, padx=4)
+        tk.Button(bar, text="停用词", command=_open_editor,
+                  bg=_COLOR_BILI_BLUE, fg="white", font=_FONT_BODY,
+                  relief=tk.FLAT, padx=12, pady=2, cursor="hand2").pack(side=tk.RIGHT, padx=4)
+
+        def _selected_word() -> str:
+            selected = word_tree.selection()
+            if not selected:
+                return ""
+            values = word_tree.item(selected[0], "values")
+            return str(values[0]).strip() if values else ""
+
+        def _block_selected_word(_event=None) -> None:
+            word = _selected_word()
+            if not word:
+                messagebox.showinfo("词云", "请先选择一个高频词", parent=win)
+                return
+            try:
+                add_user_stop_word(word)
+            except Exception as e:
+                messagebox.showerror("停用词保存失败", str(e), parent=win)
+                return
+            self._set_status(f"已加入停用词: {word}")
+            _refresh_from_same_rows()
+
+        word_tree.bind("<Double-1>", _block_selected_word)
+        tk.Button(words_panel, text="屏蔽选中词", command=_block_selected_word,
+                  bg=_COLOR_BTN_NORMAL, fg="white", font=_FONT_BODY,
+                  relief=tk.FLAT, padx=10, pady=4, cursor="hand2").pack(fill=tk.X, padx=8, pady=(0, 8))
+        tk.Button(words_panel, text="编辑停用词", command=_open_editor,
+                  bg=_COLOR_BILI_BLUE, fg="white", font=_FONT_BODY,
+                  relief=tk.FLAT, padx=10, pady=4, cursor="hand2").pack(fill=tk.X, padx=8, pady=(0, 8))
+
+        def _on_mousewheel(event) -> str:
+            if event.state & 0x0004:
+                _zoom(1.1 if event.delta > 0 else 0.9)
+            else:
+                canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            return "break"
+
+        canvas.bind("<Configure>", _schedule_render)
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        win.after(50, _render_preview)
+
+    def _open_wordcloud_stopwords_editor(self, uid: str, rows: list[dict],
+                                         preview_win: tk.Toplevel | None = None) -> None:
+        """打开用户停用词编辑窗口。"""
+        editor = tk.Toplevel(self.root)
+        editor.title("词云停用词")
+        editor.geometry("520x560")
+        editor.minsize(420, 420)
+        editor.configure(bg=_COLOR_CARD)
+
+        tk.Label(editor, text="用户停用词 (一行一个词)", font=_FONT_HEADING,
+                 bg=_COLOR_CARD, fg="#333").pack(anchor=tk.W, padx=12, pady=(12, 4))
+        tk.Label(editor, text=f"保存位置: {USER_STOPWORDS_PATH}",
+                 font=("Microsoft YaHei", 8), bg=_COLOR_CARD, fg="#888").pack(anchor=tk.W, padx=12)
+
+        text = scrolledtext.ScrolledText(editor, font=("Microsoft YaHei", 10), height=20)
+        text.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
+        try:
+            words = sorted(load_user_stop_words())
+        except Exception as e:
+            words = []
+            messagebox.showwarning("读取停用词失败", str(e), parent=editor)
+        text.insert("1.0", "\n".join(words))
+
+        btn_row = tk.Frame(editor, bg=_COLOR_CARD)
+        btn_row.pack(fill=tk.X, padx=12, pady=(0, 12))
+
+        def _refresh_preview() -> None:
+            if preview_win is not None and preview_win.winfo_exists():
+                preview_win.destroy()
+            self._generate_wordcloud_thread(uid, rows)
+
+        def _save_and_refresh() -> None:
+            try:
+                normalized = save_user_stop_words(text.get("1.0", tk.END))
+            except Exception as e:
+                messagebox.showerror("保存失败", str(e), parent=editor)
+                return
+            self._set_status(f"已保存 {len(normalized)} 个用户停用词")
+            editor.destroy()
+            _refresh_preview()
+
+        def _reset_default() -> None:
+            if not messagebox.askyesno("恢复默认", "清空用户停用词,仅保留内置默认词?", parent=editor):
+                return
+            try:
+                clear_user_stop_words()
+            except Exception as e:
+                messagebox.showerror("恢复默认失败", str(e), parent=editor)
+                return
+            text.delete("1.0", tk.END)
+            self._set_status("已清空用户停用词")
+            _refresh_preview()
+
+        def _import_txt() -> None:
+            filepath = filedialog.askopenfilename(
+                parent=editor,
+                filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            )
+            if not filepath:
+                return
+            try:
+                imported = Path(filepath).read_text(encoding="utf-8-sig")
+            except Exception as e:
+                messagebox.showerror("导入失败", str(e), parent=editor)
+                return
+            current = text.get("1.0", tk.END)
+            merged = normalize_stop_words(current + "\n" + imported)
+            text.delete("1.0", tk.END)
+            text.insert("1.0", "\n".join(merged))
+
+        def _export_txt() -> None:
+            filepath = filedialog.asksaveasfilename(
+                parent=editor,
+                defaultextension=".txt",
+                filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+                initialfile="wordcloud_stopwords.txt",
+            )
+            if not filepath:
+                return
+            try:
+                words = normalize_stop_words(text.get("1.0", tk.END))
+                Path(filepath).write_text("\n".join(words) + ("\n" if words else ""),
+                                          encoding="utf-8", newline="\n")
+            except Exception as e:
+                messagebox.showerror("导出失败", str(e), parent=editor)
+                return
+            messagebox.showinfo("导出成功", f"已导出到:\n{filepath}", parent=editor)
+
+        tk.Button(btn_row, text="保存并重新生成", command=_save_and_refresh,
+                  bg="#8e44ad", fg="white", font=_FONT_BODY,
+                  relief=tk.FLAT, padx=12, pady=4, cursor="hand2").pack(side=tk.RIGHT, padx=4)
+        tk.Button(btn_row, text="恢复默认", command=_reset_default,
+                  bg=_COLOR_BTN_DANGER, fg="white", font=_FONT_BODY,
+                  relief=tk.FLAT, padx=12, pady=4, cursor="hand2").pack(side=tk.RIGHT, padx=4)
+        tk.Button(btn_row, text="导出txt", command=_export_txt,
+                  bg=_COLOR_BTN_NORMAL, fg="white", font=_FONT_BODY,
+                  relief=tk.FLAT, padx=12, pady=4, cursor="hand2").pack(side=tk.LEFT, padx=4)
+        tk.Button(btn_row, text="导入txt", command=_import_txt,
+                  bg=_COLOR_BTN_NORMAL, fg="white", font=_FONT_BODY,
+                  relief=tk.FLAT, padx=12, pady=4, cursor="hand2").pack(side=tk.LEFT, padx=4)
 
     def _clear_filter(self, tree: ttk.Treeview, rows: list[dict],
                       filter_entry: tk.Entry, count_var: tk.StringVar) -> None:
