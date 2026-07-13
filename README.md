@@ -32,6 +32,7 @@ bilispider/
 │   ├── cookies.json            # 登录 Cookie
 │   ├── crawl_queue.json        # 待爬 UID 队列
 │   └── comments.db             # 评论数据库
+├── datasets/                   # 可提交的 JSONL 评论数据集
 ├── docs/
 │   └── reference/              # 参考资料与外部实现笔记
 ├── examples/                   # 示例查询脚本
@@ -40,6 +41,8 @@ bilispider/
 │   └── get_user_videos.py
 ├── tools/                      # 调试与检查脚本
 │   ├── check_db.py
+│   ├── export_comments.py
+│   ├── import_comments.py
 │   └── test_comment_api.py
 ├── benchmark.py                # 爬取稳定性基准测试
 ├── crawl_comments.py           # 命令行评论爬取入口
@@ -111,6 +114,37 @@ python crawl_comments.py 2 --days 30 --max-videos 5
 | `data/comments.db` | SQLite 评论数据库 |
 
 `cookies.json`、数据库和队列文件已加入 `.gitignore`。`config.json` 目前保留在仓库中，便于保存默认 GUI 配置。
+
+## 数据协作
+
+不要直接提交 `data/comments.db`。SQLite 数据库是二进制文件，多人修改后很难用 Git 合并；本项目改用 `datasets/*.jsonl` 作为可提交的数据交换格式。
+
+导出本地评论：
+
+```bash
+python tools/export_comments.py --uid 2 --out datasets/comments_uid_2.jsonl
+```
+
+也可以按视频或时间范围导出：
+
+```bash
+python tools/export_comments.py --oid 123456 --out datasets/comments_oid_123456.jsonl
+python tools/export_comments.py --since 1750000000 --out datasets/comments_recent.jsonl
+```
+
+导入别人提交的数据：
+
+```bash
+python tools/import_comments.py datasets/comments_uid_2.jsonl
+```
+
+批量导入：
+
+```bash
+python tools/import_comments.py datasets/*.jsonl
+```
+
+JSONL 每行是一条评论，导入时按 `(rpid, oid, type)` 自动去重，因此重复导入不会产生重复数据。
 
 ## 数据库表
 
