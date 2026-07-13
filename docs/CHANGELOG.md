@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Added optional remote dataset synchronization for `jsonl.gz` GitHub Release assets, with first-run opt-in, manual sync, sha256 verification, and SQLite de-duplicated import.
+- Made packaging boundaries explicit so runtime data, local config, cookies, SQLite databases, and JSONL datasets are not bundled into the installer.
+- Reduced unused Jieba packaging inputs by removing unused analysis imports and excluding nonessential Jieba data folders from the PyInstaller bundle.
+
 ## v0.3.1
 
 - Rewrote `README.md` as a user-first guide covering setup, GUI usage, local data safety, word cloud features, dataset collaboration, development checks, and Windows packaging.

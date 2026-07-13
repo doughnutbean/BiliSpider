@@ -15,9 +15,13 @@ B站数据爬取工具 —— Tkinter 图形化界面。
 from __future__ import annotations
 
 import json
+import gzip
+import hashlib
 import os
 from pathlib import Path
+import shutil
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -49,6 +53,7 @@ from .dataset_tools import (
     quick_validate,
     COMMENT_COLUMNS,
 )
+from .remote_sync import DEFAULT_REMOTE_MANIFEST_URL, sync_remote_datasets
 from .paths import CONFIG_PATH, CRAWL_QUEUE_PATH, COMMENTS_DB_PATH, ensure_data_dir
 from .wbi import enc_wbi, get_wbi_keys
 
@@ -118,10 +123,15 @@ class BiliSpiderGUI:
         self._current_crawl_uid: Optional[str] = None
         self._queue_continue = False
         self._wordcloud_context: dict | None = None
+        self._remote_sync_running = False
+        self._publish_running = False
+        self._config: dict = {}
 
         # UI 变量
         self._login_status_var = tk.StringVar(value="未登录")
         self._db_status_var = tk.StringVar(value="")
+        self._remote_sync_enabled_var = tk.BooleanVar(value=False)
+        self._remote_sync_status_var = tk.StringVar(value="远端同步: 未开启")
         self._status_bar_var = tk.StringVar(value="就绪")
 
         self._config_path = str(CONFIG_PATH)
@@ -131,6 +141,7 @@ class BiliSpiderGUI:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._check_login_on_start()
         self._refresh_db_status()
+        self.root.after(600, self._remote_sync_startup_check)
 
     # ─── 配置持久化 ─────────────────────────────────────────────
 
@@ -140,6 +151,7 @@ class BiliSpiderGUI:
                 cfg = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             cfg = {}
+        self._config = cfg
 
         self._uid_entry.delete(0, tk.END)
         self._uid_entry.insert(0, cfg.get("query_uid", "2"))
@@ -162,6 +174,7 @@ class BiliSpiderGUI:
         self._collab_dir_var.set(cfg.get("collab_dir", "datasets"))
         self._collab_contributor_entry.delete(0, tk.END)
         self._collab_contributor_entry.insert(0, cfg.get("contributor", ""))
+        self._remote_sync_enabled_var.set(bool(cfg.get("remote_sync_enabled", False)))
 
     def _save_config(self) -> None:
         cfg = {
@@ -179,7 +192,11 @@ class BiliSpiderGUI:
             "collab_uid": self._collab_uid_entry.get().strip(),
             "collab_dir": self._collab_dir_var.get(),
             "contributor": self._collab_contributor_entry.get().strip(),
+            "remote_sync_enabled": self._remote_sync_enabled_var.get(),
+            "remote_sync_prompted": bool(self._config.get("remote_sync_prompted", False)),
+            "remote_manifest_url": self._config.get("remote_manifest_url", DEFAULT_REMOTE_MANIFEST_URL),
         }
+        self._config = cfg
         try:
             ensure_data_dir()
             with open(self._config_path, "w", encoding="utf-8") as f:
@@ -457,6 +474,17 @@ class BiliSpiderGUI:
         _btn_normal(toolbar, "导入JSONL", self._collab_import).pack(side=tk.LEFT, padx=2)
         _btn_normal(toolbar, "校验JSONL", self._collab_validate).pack(side=tk.LEFT, padx=2)
         _btn_normal(toolbar, "数据库统计", self._collab_stats).pack(side=tk.LEFT, padx=2)
+        _btn_normal(toolbar, "一键导出并发布(我专用)", self._collab_export_publish_remote).pack(side=tk.LEFT, padx=(10, 2))
+
+        _btn_normal(toolbar, "立即同步", self._remote_sync_manual).pack(side=tk.LEFT, padx=(10, 2))
+        tk.Checkbutton(
+            toolbar,
+            text="启动时自动同步",
+            variable=self._remote_sync_enabled_var,
+            command=self._remote_sync_toggle,
+            bg=_COLOR_CARD,
+            font=_FONT_SMALL,
+        ).pack(side=tk.LEFT, padx=2)
 
         param_row = tk.Frame(self._collab_tab, bg=_COLOR_CARD)
         param_row.pack(fill=tk.X, padx=8, pady=(2, 4))
@@ -474,6 +502,9 @@ class BiliSpiderGUI:
         tk.Label(param_row, text="贡献者:", font=_FONT_SMALL, bg=_COLOR_CARD).pack(side=tk.LEFT)
         self._collab_contributor_entry = tk.Entry(param_row, font=_FONT_SMALL, width=12)
         self._collab_contributor_entry.pack(side=tk.LEFT, padx=2)
+
+        tk.Label(param_row, textvariable=self._remote_sync_status_var,
+                 font=_FONT_SMALL, bg=_COLOR_CARD, fg="#888").pack(side=tk.RIGHT, padx=6)
 
         self._collab_result = scrolledtext.ScrolledText(
             self._collab_tab, font=_FONT_MONO, wrap=tk.WORD,
@@ -1590,6 +1621,239 @@ class BiliSpiderGUI:
             messagebox.showinfo("导出成功", f"已保存为CSV:\n{filepath}")
 
     # ─── 数据协作逻辑 ───────────────────────────────────────────
+
+    # ─── 远端数据同步 ─────────────────────────────────────────────
+
+    def _collab_export_publish_remote(self) -> None:
+        if self._publish_running:
+            messagebox.showinfo("一键导出并发布", "发布任务正在进行中。", parent=self.root)
+            return
+        if not messagebox.askyesno(
+            "一键导出并发布（我专用）",
+            "将导出当前本地 comments.db 的全量 JSONL，压缩为 jsonl.gz，"
+            "生成远端同步 manifest，并上传到当前 GitHub latest release。\n\n确认继续？",
+            parent=self.root,
+        ):
+            return
+
+        self._publish_running = True
+        self._collab_clear_result()
+        self._collab_append_result("=== 一键导出并发布远端数据包 ===\n")
+        self._set_status("正在导出并发布远端数据包...")
+
+        def log(message: str) -> None:
+            self.root.after(0, lambda m=message: self._collab_append_result(m + "\n"))
+
+        def sha256_file(path: Path) -> str:
+            sha = hashlib.sha256()
+            with path.open("rb") as fh:
+                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                    sha.update(chunk)
+            return sha.hexdigest()
+
+        def find_gh() -> str:
+            gh = shutil.which("gh")
+            if gh:
+                return gh
+            candidates = [
+                Path(os.environ.get("ProgramFiles", "")) / "GitHub CLI" / "gh.exe",
+                Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "GitHub CLI" / "gh.exe",
+                Path(os.environ.get("ProgramFiles(x86)", "")) / "GitHub CLI" / "gh.exe",
+            ]
+            for candidate in candidates:
+                if candidate.exists():
+                    return str(candidate)
+            raise RuntimeError("未找到 GitHub CLI: gh.exe")
+
+        def run_checked(args: list[str]) -> str:
+            completed = subprocess.run(
+                args,
+                cwd=Path(__file__).resolve().parent.parent,
+                text=True,
+                capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+            if completed.returncode != 0:
+                output = (completed.stderr or completed.stdout or "").strip()
+                raise RuntimeError(f"命令失败: {' '.join(args)}\n{output}")
+            return completed.stdout.strip()
+
+        def _run() -> None:
+            try:
+                out_dir = Path(self._collab_dir_var.get().strip() or "datasets")
+                out_dir.mkdir(parents=True, exist_ok=True)
+                date_str = time.strftime("%Y-%m-%d")
+                jsonl_path = out_dir / f"comments_all_{date_str}.jsonl"
+                gz_path = out_dir / f"{jsonl_path.name}.gz"
+                manifest_path = out_dir / "bilispider-data-manifest.json"
+
+                log(f"导出全量 JSONL: {jsonl_path}")
+                result = ds_export(out_path=str(jsonl_path))
+                if not result.get("success"):
+                    raise RuntimeError(f"导出失败: {result.get('error', '未知错误')}")
+                log(f"导出完成: {result.get('exported', 0)} 条")
+
+                qv = quick_validate(jsonl_path)
+                if not qv.get("success"):
+                    raise RuntimeError(f"JSONL 校验失败: {qv.get('errors', [])[:3]}")
+                log(f"校验通过: {qv.get('rows', 0)} 行")
+
+                log(f"压缩: {gz_path}")
+                with jsonl_path.open("rb") as src, gzip.open(gz_path, "wb", compresslevel=9) as dst:
+                    shutil.copyfileobj(src, dst, length=1024 * 1024)
+
+                gz_sha = sha256_file(gz_path)
+                generated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+                manifest = {
+                    "version": 1,
+                    "generated_at": generated_at,
+                    "files": [
+                        {
+                            "name": gz_path.name,
+                            "sha256": gz_sha,
+                            "size_bytes": gz_path.stat().st_size,
+                            "comments": int(result.get("exported", 0) or 0),
+                            "generated_at": generated_at,
+                        }
+                    ],
+                }
+                manifest_path.write_text(
+                    json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                log(f"写入远端 manifest: {manifest_path}")
+
+                gh = find_gh()
+                log("检查 GitHub 登录状态...")
+                run_checked([gh, "auth", "status"])
+                tag = run_checked([gh, "release", "view", "--json", "tagName", "--jq", ".tagName"])
+                if not tag:
+                    raise RuntimeError("无法获取 latest release tag")
+                log(f"latest release: {tag}")
+
+                log("上传数据包和 manifest 到 GitHub Release...")
+                run_checked([gh, "release", "upload", tag, str(gz_path), str(manifest_path), "--clobber"])
+                log("发布完成。")
+
+                def finish_ok() -> None:
+                    self._publish_running = False
+                    self._set_status("远端数据包发布完成")
+                    messagebox.showinfo(
+                        "发布完成",
+                        f"已上传到 {tag}:\n{gz_path.name}\n{manifest_path.name}",
+                        parent=self.root,
+                    )
+
+                self.root.after(0, finish_ok)
+            except Exception as exc:
+                def finish_error() -> None:
+                    self._publish_running = False
+                    self._set_status("远端数据包发布失败")
+                    self._collab_append_result(f"发布失败: {exc}\n")
+                    messagebox.showerror("发布失败", str(exc), parent=self.root)
+
+                self.root.after(0, finish_error)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _remote_sync_manifest_url(self) -> str:
+        return str(self._config.get("remote_manifest_url") or DEFAULT_REMOTE_MANIFEST_URL)
+
+    def _remote_sync_startup_check(self) -> None:
+        prompted = bool(self._config.get("remote_sync_prompted", False))
+        if not prompted:
+            ok = messagebox.askyesno(
+                "远端数据同步",
+                "是否开启启动时自动同步远端评论数据集？\n\n"
+                "开启后每次启动只会先检查远端清单，有新数据时才下载并合并到本地数据库。",
+                parent=self.root,
+            )
+            self._config["remote_sync_prompted"] = True
+            self._remote_sync_enabled_var.set(bool(ok))
+            self._save_config()
+            if ok:
+                self._remote_sync_run(auto=True)
+            else:
+                self._remote_sync_status_var.set("远端同步: 已关闭")
+            return
+
+        if self._remote_sync_enabled_var.get():
+            self._remote_sync_run(auto=True)
+        else:
+            self._remote_sync_status_var.set("远端同步: 已关闭")
+
+    def _remote_sync_toggle(self) -> None:
+        self._config["remote_sync_prompted"] = True
+        self._save_config()
+        if self._remote_sync_enabled_var.get():
+            self._remote_sync_status_var.set("远端同步: 已开启")
+            self._remote_sync_run(auto=False)
+        else:
+            self._remote_sync_status_var.set("远端同步: 已关闭")
+            self._set_status("已关闭启动时自动同步")
+
+    def _remote_sync_manual(self) -> None:
+        self._config["remote_sync_prompted"] = True
+        self._save_config()
+        self._remote_sync_run(auto=False)
+
+    def _remote_sync_run(self, auto: bool = False) -> None:
+        if self._remote_sync_running:
+            if not auto:
+                messagebox.showinfo("远端同步", "远端同步正在进行中。", parent=self.root)
+            return
+        self._remote_sync_running = True
+        self._remote_sync_status_var.set("远端同步: 检查中...")
+        self._set_status("正在同步远端数据...")
+        if not auto:
+            self._collab_append_result("\n=== 开始同步远端数据集 ===\n")
+
+        def progress(message: str) -> None:
+            self.root.after(0, lambda m=message: self._remote_sync_status_var.set(f"远端同步: {m}"))
+            if not auto:
+                self.root.after(0, lambda m=message: self._collab_append_result(f"{m}\n"))
+
+        def _run() -> None:
+            result = sync_remote_datasets(
+                self._remote_sync_manifest_url(),
+                progress_callback=progress,
+            )
+
+            def finish() -> None:
+                self._remote_sync_running = False
+                if result.get("success"):
+                    if result.get("up_to_date"):
+                        summary = "远端同步: 已是最新"
+                    else:
+                        summary = (
+                            f"远端同步: 新增 {result.get('inserted', 0)} 条, "
+                            f"跳过 {result.get('skipped', 0)} 条"
+                        )
+                    self._remote_sync_status_var.set(summary)
+                    self._set_status(summary)
+                    text = (
+                        f"同步完成: 检查 {result.get('checked', 0)} 个文件, "
+                        f"下载 {result.get('downloaded', 0)} 个, "
+                        f"读取 {result.get('read', 0)} 条, "
+                        f"新增 {result.get('inserted', 0)} 条, "
+                        f"跳过 {result.get('skipped', 0)} 条\n"
+                    )
+                    if not auto or not result.get("up_to_date"):
+                        self._collab_append_result(text)
+                    self._refresh_db_status()
+                else:
+                    errors = result.get("errors") or ["未知错误"]
+                    summary = f"远端同步失败: {errors[0]}"
+                    self._remote_sync_status_var.set("远端同步: 失败")
+                    self._set_status(summary)
+                    self._collab_append_result(summary + "\n")
+                    if not auto:
+                        messagebox.showerror("远端同步失败", errors[0], parent=self.root)
+
+            self.root.after(0, finish)
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _collab_append_result(self, text: str) -> None:
         self._collab_result.configure(state=tk.NORMAL)

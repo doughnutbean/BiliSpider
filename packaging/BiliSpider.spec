@@ -37,10 +37,29 @@ hiddenimports += [
     "qrcode.image.pil",
     "openpyxl",
     "jieba",
-    "jieba.analyse",
     "wordcloud",
     "wordcloud.wordcloud",
 ]
+
+
+def _keep_packaged_data(item):
+    target = str(item[0]).replace("\\", "/").lower()
+    source = str(item[1]).replace("\\", "/").lower() if len(item) > 1 else ""
+    combined = f"{target} {source}"
+    blocked = (
+        "/data/",
+        "comments.db",
+        "cookies.json",
+        "config.json",
+        "crawl_queue.json",
+        "wordcloud_stopwords.txt",
+        ".jsonl",
+        "datasets/",
+        "jieba/analyse/",
+        "jieba/posseg/",
+        "jieba/lac_small/",
+    )
+    return not any(part in combined for part in blocked)
 
 
 a = Analysis(
@@ -68,6 +87,7 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+a.datas = [item for item in a.datas if _keep_packaged_data(item)]
 pyz = PYZ(a.pure)
 
 exe = EXE(
