@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.1
+
+- Rewrote `README.md` as a user-first guide covering setup, GUI usage, local data safety, word cloud features, dataset collaboration, development checks, and Windows packaging.
+- Added word cloud stopword management notes for Top word blocking, user-maintained stopwords, PNG export, and local-only preference storage.
+- Improved the crawl log viewing experience so new output no longer forces the log view to the bottom while the user is reading earlier lines.
+- Updated Windows packaging defaults and release instructions for `BiliSpiderSetup-0.3.1.exe`.
+- Rechecked sensitive-file boundaries before release: runtime config, cookies, SQLite databases, build outputs, and user stopword preferences remain local-only.
+
 ## v0.3.0
 
 - Prepared the Windows installer release as `BiliSpiderSetup-0.3.0.exe`.
@@ -11,7 +19,7 @@
 
 - 整理 Tkinter GUI 数据协作页，移除热修后残留的不可达旧逻辑。
 - 数据协作页支持导出、导入、校验、数据库统计、拆分导出取消和批量删除确认。
-- 批量删除限制为当前目录一层 `.jsonl` 文件，并在删除前再次校验路径边界。
+- 批量删除限制为当前目录一层的 `.jsonl` 文件，并在删除前再次校验路径边界。
 - 本地检索融合本地 SQLite 与在线 API，并明确展示在线 API 可用、无数据或不可用状态。
 - `prepare_dataset.py` 成为提交前统一检查入口，覆盖 JSONL 校验、重复主键、大文件提醒、命名规范和 manifest 一致性。
 - `prepare_dataset.py --update-manifest` 可在新增、删除或重命名数据集后重建 `datasets/manifest.json`。
@@ -21,5 +29,4 @@
 
 ## v1
 
-- 初始 GUI、登录、WBI 签名、用户信息查询、评论爬取和 SQLite 持久化能力。
-
+- 初始 GUI、登录、WBI 签名、用户信息查询、评论采集和 SQLite 持久化能力。
