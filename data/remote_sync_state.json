@@ -9,7 +9,16 @@
       "read": 210469,
       "inserted": 0,
       "skipped": 210469
+    },
+    "comments_all_2026-07-14.jsonl.gz": {
+      "sha256": "d624d9ed184b0f735dda807afcbc05f14fc274bb44a2c3c82a91fadfceecd151",
+      "size_bytes": 21451692,
+      "comments": 279569,
+      "imported_at": 1783959578,
+      "read": 279569,
+      "inserted": 0,
+      "skipped": 279569
     }
   },
-  "last_checked_at": 1783959364
+  "last_checked_at": 1783959578
 }

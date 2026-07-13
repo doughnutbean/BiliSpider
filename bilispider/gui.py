@@ -138,6 +138,7 @@ class BiliSpiderGUI:
 
         self._build_ui()
         self._load_config()
+        self._refresh_queue_display()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._check_login_on_start()
         self._refresh_db_status()
@@ -216,9 +217,18 @@ class BiliSpiderGUI:
 
     def _load_queue(self) -> list[str]:
         try:
-            with open(self._queue_path, "r", encoding="utf-8") as f:
+            with open(self._queue_path, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
-                return data if isinstance(data, list) else []
+                if not isinstance(data, list):
+                    return []
+                queue: list[str] = []
+                seen: set[str] = set()
+                for item in data:
+                    uid = str(item).strip()
+                    if uid.isdigit() and uid not in seen:
+                        queue.append(uid)
+                        seen.add(uid)
+                return queue
         except (FileNotFoundError, json.JSONDecodeError):
             return []
 
@@ -233,6 +243,7 @@ class BiliSpiderGUI:
             return
         queue = self._load_queue()
         if uid in queue:
+            self._refresh_queue_display()
             self._set_status(f"UID {uid} 已在队列中")
             return
         queue.append(uid)
