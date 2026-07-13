@@ -92,10 +92,10 @@ class BiliSpiderGUI:
             self._search_uid_entry.delete(0, tk.END)
             self._search_uid_entry.insert(0, cfg.get("search_uid", "2"))
             # 速率控制
-            self._rate_base_var.set(cfg.get("rate_base", "2.0"))
-            self._rate_jitter_var.set(cfg.get("rate_jitter", "2.0"))
+            self._rate_base_var.set(cfg.get("rate_base", "1.5"))
+            self._rate_jitter_var.set(cfg.get("rate_jitter", "1.0"))
             self._snooze_var.set(cfg.get("snooze", "10"))
-            self._auto_tune_var.set(cfg.get("auto_tune", True))
+            self._auto_tune_var.set(cfg.get("auto_tune", False))
             self._auto_snooze_var.set(cfg.get("auto_snooze", True))
         except (FileNotFoundError, json.JSONDecodeError, KeyError):
             pass

@@ -617,10 +617,10 @@ class CommentCrawler:
         max_videos: int = 0,
         proxies: list[str] | None = None,
         progress_callback=None,
-        rate_base: float = 2.0,
-        rate_jitter: float = 2.0,
+        rate_base: float = 1.5,
+        rate_jitter: float = 1.0,
         snooze_minutes: int = 10,
-        auto_tune: bool = True,
+        auto_tune: bool = False,
         auto_snooze: bool = True,
     ) -> None:
         """
