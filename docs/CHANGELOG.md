@@ -1,10 +1,11 @@
 # Changelog
 
-## Unreleased
+## v0.3.2
 
 - Added optional remote dataset synchronization for `jsonl.gz` GitHub Release assets, with first-run opt-in, manual sync, sha256 verification, and SQLite de-duplicated import.
 - Made packaging boundaries explicit so runtime data, local config, cookies, SQLite databases, and JSONL datasets are not bundled into the installer.
 - Reduced unused Jieba packaging inputs by removing unused analysis imports and excluding nonessential Jieba data folders from the PyInstaller bundle.
+- Prepared the Windows installer release as `BiliSpiderSetup-0.3.2.exe`.
 
 ## v0.3.1
 
