@@ -68,6 +68,8 @@ _PAUSE_ANTI_FREQ = 30.0    # -799 请求频繁
 _PAUSE_RISK = 90.0         # -412 风控拦截
 _ROOT_TRUNCATION_MIN_TOTAL = 50  # 总量明显大于返回量时,判定疑似接口截断
 _SUSPECT_DONE_MAX_ROOT = 3  # 旧接口游客态误标完成时通常只保存 0~3 条一级评论
+_REFRESH_THRESHOLD = 100    # 远端总量 - 本地总量 >= 此值时触发增量重爬
+_GROWTH_CHECK_FETCH_ALLOW = True  # 远端总量检查允许做一次轻量 API 请求
 
 # ─── 评论 API 端点 ────────────────────────────────────────────
 # B站网页端评论接口已经改用 cursor 分页 (seek_rpid),旧 pn 分页已部分失效。
@@ -502,37 +504,45 @@ class CommentDatabase:
                 status          TEXT NOT NULL DEFAULT 'pending',
                 total_root      INTEGER DEFAULT 0,
                 total_subs      INTEGER DEFAULT 0,
+                remote_total    INTEGER DEFAULT 0,
                 PRIMARY KEY (oid, type)
             );
         """)
+        # 轻量迁移: 为旧数据库补加 remote_total 列
+        try:
+            self.conn.execute(
+                "ALTER TABLE crawl_progress ADD COLUMN remote_total INTEGER DEFAULT 0"
+            )
+        except sqlite3.OperationalError:
+            pass  # 列已存在
 
     # ── 评论写入 ──
 
     def insert_comment(self, c: CommentRecord) -> None:
-        """插入或忽略一条评论 (PRIMARY KEY 冲突则跳过)。"""
+        """插入或更新一条评论。冲突时更新 like_count/sub_count/message 等可变字段。"""
         self.conn.execute(
-            """INSERT OR IGNORE INTO comments
+            """INSERT INTO comments
                (rpid, oid, type, mid, parent, root, ctime, message,
                 like_count, sub_count, crawl_time)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(rpid, oid, type) DO UPDATE SET
+                   like_count=excluded.like_count,
+                   sub_count=excluded.sub_count,
+                   message=excluded.message,
+                   ctime=excluded.ctime,
+                   crawl_time=excluded.crawl_time""",
             (c.rpid, c.oid, c.type, c.mid, c.parent, c.root,
              c.ctime, c.message, c.like_count, c.sub_count, c.crawl_time),
         )
 
     def insert_comments_batch(self, records: list[CommentRecord]) -> int:
-        """批量插入评论,返回实际插入条数。"""
+        """批量插入或更新评论,返回有变更的行数。"""
         count = 0
-        with self.conn:  # 事务
+        with self.conn:
             for c in records:
-                self.conn.execute(
-                    """INSERT OR IGNORE INTO comments
-                       (rpid, oid, type, mid, parent, root, ctime, message,
-                        like_count, sub_count, crawl_time)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (c.rpid, c.oid, c.type, c.mid, c.parent, c.root,
-                     c.ctime, c.message, c.like_count, c.sub_count, c.crawl_time),
-                )
-                if self.conn.total_changes > count:
+                prev_changes = self.conn.total_changes
+                self.insert_comment(c)
+                if self.conn.total_changes > prev_changes:
                     count += 1
             return count
 
@@ -546,7 +556,7 @@ class CommentDatabase:
         ).fetchone()
         if row is None:
             return {"root_pages_done": 0, "sub_progress": "{}", "status": "pending",
-                    "total_root": 0, "total_subs": 0}
+                    "total_root": 0, "total_subs": 0, "remote_total": 0}
         return {
             "root_pages_done": row[2],
             "sub_progress": row[3],
@@ -554,6 +564,7 @@ class CommentDatabase:
             "status": row[5],
             "total_root": row[6] or 0,
             "total_subs": row[7] or 0,
+            "remote_total": row[8] or 0,
         }
 
     def upsert_progress(self, oid: int, ctype: int, **kwargs) -> None:
@@ -568,7 +579,7 @@ class CommentDatabase:
             sets = []
             vals = []
             for key in ("root_pages_done", "sub_progress", "status",
-                         "total_root", "total_subs"):
+                         "total_root", "total_subs", "remote_total"):
                 if key in kwargs:
                     sets.append(f"{key}=?")
                     vals.append(kwargs[key])
@@ -582,15 +593,16 @@ class CommentDatabase:
         else:
             self.conn.execute(
                 """INSERT INTO crawl_progress
-                   (oid, type, root_pages_done, sub_progress, last_crawl, status, total_root, total_subs)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (oid, type, root_pages_done, sub_progress, last_crawl, status, total_root, total_subs, remote_total)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (oid, ctype,
                  kwargs.get("root_pages_done", 0),
                  kwargs.get("sub_progress", "{}"),
                  now,
                  kwargs.get("status", "pending"),
                  kwargs.get("total_root", 0),
-                 kwargs.get("total_subs", 0)),
+                 kwargs.get("total_subs", 0),
+                 kwargs.get("remote_total", 0)),
             )
         self.conn.commit()
 
@@ -760,8 +772,59 @@ class CommentCrawler:
             return False
         return True
 
-    def _is_suspect_done_progress(self, oid: int, ctype: int, progress: dict) -> bool:
-        """判断历史 done 状态是否疑似由旧截断接口误写。"""
+    def _check_remote_growth(self, oid: int, ctype: int, progress: dict) -> tuple[bool, int, int]:
+        """
+        检查远端评论总量是否比本地显著增长。
+
+        对 status='done' 的视频请求一次 wbi/main 首页获取 cursor.all_count，
+        与本地数据库总评论数（一级+子评论）对比。差值 >= _REFRESH_THRESHOLD 时
+        触发增量重爬。
+
+        返回:
+            (是否需要刷新, 远端总量, 本地总量)
+        失败时返回 (False, 0, 0)，不误重爬。
+        """
+        if not _GROWTH_CHECK_FETCH_ALLOW:
+            return False, 0, 0
+        try:
+            referer = f"https://www.bilibili.com/video/av{oid}/"
+            params = {"type": ctype, "oid": oid, "mode": 2, "ps": 1, "plat": 1}
+            result = self._signed_get(_CURSOR_API_URL, params, referer=referer)
+            if result is None:
+                return False, 0, 0
+            data = result.get("data")
+            if data is None:
+                return False, 0, 0
+            remote_total = int(data.get("cursor", {}).get("all_count", 0))
+            if remote_total <= 0:
+                return False, 0, 0
+
+            local_total = self.db.conn.execute(
+                "SELECT COUNT(*) FROM comments WHERE oid=? AND type=?",
+                (oid, ctype),
+            ).fetchone()[0]
+
+            # 保存远端总量到进度，方便 GUI/日志展示
+            self.db.upsert_progress(oid, ctype, remote_total=remote_total)
+
+            diff = remote_total - local_total
+            need_refresh = diff >= _REFRESH_THRESHOLD
+            if need_refresh:
+                print(
+                    f"    aid={oid}: 远端总量 {remote_total}, 本地 {local_total}, "
+                    f"增量 {diff} >= {_REFRESH_THRESHOLD}, 重新补抓"
+                )
+            else:
+                print(
+                    f"    aid={oid}: 远端总量 {remote_total}, 本地 {local_total}, "
+                    f"增量 {diff}, 跳过"
+                )
+            return need_refresh, remote_total, local_total
+        except Exception:
+            return False, 0, 0
+
+    def _is_trivial_root_collection(self, oid: int, ctype: int, progress: dict) -> bool:
+        """判断历史 done 状态是否只采集了极少量一级评论（旧接口误标完成）。"""
         if progress.get("status") != "done":
             return False
         root_count = self.db.conn.execute(
@@ -1159,12 +1222,15 @@ class CommentCrawler:
                 page_num += 1
         if not any_ok:
             raise RuntimeError("cursor API unavailable")
-        known_root_count = len(existing_rpids)
-        # cursor.all_count can include child replies, so root comments are
-        # expected to be much fewer than all_count. Treat it as truncated only
-        # when the root list is still at the old guest/API cap size.
-        truncated = (best_all_count >= _ROOT_TRUNCATION_MIN_TOTAL
-                     and known_root_count <= _SUSPECT_DONE_MAX_ROOT)
+        # 不再用 cursor.all_count 判断一级评论截断——all_count 包含子评论,
+        # 且远端增量由 _check_remote_growth 负责触发重爬。
+        # 仅当 cursor API 完全无法获取新评论时标记 truncated（触发 limited）。
+        if total_new == 0:
+            known_root_count = len(existing_rpids)
+            truncated = (best_all_count >= _ROOT_TRUNCATION_MIN_TOTAL
+                         and known_root_count <= _SUSPECT_DONE_MAX_ROOT)
+        else:
+            truncated = False
         return total_new, best_all_count, truncated
 
     def _crawl_root_fallback(self, oid: int, ctype: int) -> int:
@@ -1217,20 +1283,32 @@ class CommentCrawler:
         """
         爬取某个评论区的一级评论。
         优先使用 cursor API (wbi/main + seek_rpid),失败时回退旧 pn API。
-        all_count 远大于实际采集数 → 标记 limited 状态。
+        远端总量 - 本地总量 >= 阈值时触发增量补抓。
         """
         progress = self.db.get_progress(oid, ctype)
         if progress["status"] == "done":
-            if self._is_suspect_done_progress(oid, ctype, progress):
+            # 1) 检查是否为旧接口误标的空壳完成状态
+            if self._is_trivial_root_collection(oid, ctype, progress):
                 print(f"    aid={oid}: 历史完成状态疑似截断,改为 limited 并重新采集...")
-                self.db.upsert_progress(
-                    oid, ctype,
+                self.db.upsert_progress(oid, ctype,
                     root_pages_done=0,
                     sub_progress="{}",
                     status="limited",
                     total_subs=0,
                 )
                 progress = self.db.get_progress(oid, ctype)
+            # 2) 检查远端评论总量是否增长到需要刷新
+            elif self._check_remote_growth(oid, ctype, progress)[0]:
+                print(f"    aid={oid}: 远端总量增长,重置进度重新补抓...")
+                # 保留 sub_progress 以支持子评论增量补缺口
+                old_sub = progress.get("sub_progress", "{}")
+                self.db.upsert_progress(oid, ctype,
+                    root_pages_done=0,
+                    status="pending",
+                    total_subs=0,
+                )
+                progress = {"root_pages_done": 0, "sub_progress": old_sub,
+                            "status": "pending", "total_root": 0, "total_subs": 0}
             else:
                 print(f"    aid={oid}: 已完成,跳过")
                 return progress.get("total_root", 0)
