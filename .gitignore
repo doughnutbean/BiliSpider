@@ -48,3 +48,7 @@ datasets/test_*.jsonl
 
 #agents
 codewhale-直连.bat
+
+# Analysis / debug tools
+analyze_page.py
+cdp_capture.py

@@ -66,6 +66,21 @@ _RETRY_BASE_DELAY = 5.0    # 重试基础延迟
 # 风控暂停时间 (秒)
 _PAUSE_ANTI_FREQ = 30.0    # -799 请求频繁
 _PAUSE_RISK = 90.0         # -412 风控拦截
+_ROOT_TRUNCATION_MIN_TOTAL = 50  # 总量明显大于返回量时,判定疑似接口截断
+
+# ─── 评论 API 端点 ────────────────────────────────────────────
+# B站网页端评论接口已经改用 cursor 分页 (seek_rpid),旧 pn 分页已部分失效。
+# 一级评论优先使用 cursor API (wbi/main),旧接口保留为 fallback。
+
+_CURSOR_API_URL = "https://api.bilibili.com/x/v2/reply/wbi/main"
+_FALLBACK_API_URL = "https://api.bilibili.com/x/v2/reply"
+_SUB_REPLY_API_URL = "https://api.bilibili.com/x/v2/reply/reply"
+
+# cursor 分页: 服务器端硬限制每页至多返回 3 条,
+# 与 ps 参数无关 (ps=20/50/100 均被忽略)。
+_CURSOR_PAGE_SIZE = 20  # 请求时仍用 20,服务器实际返回 <=3
+_CURSOR_MAX_EMPTY = 3   # 连续 N 页无新 rpid 时停止翻页
+_CURSOR_MODES = [2, 3]  # 2=按时间, 3=按热度 (采集两种排序以最大化去重后条数)
 
 # ─── 速率控制器 (自适应风控) ─────────────────────────────────────
 
@@ -573,6 +588,7 @@ class CommentDatabase:
                  kwargs.get("total_root", 0),
                  kwargs.get("total_subs", 0)),
             )
+        self.conn.commit()
 
     def get_stats(self) -> dict:
         """获取数据库统计信息。"""
@@ -609,6 +625,12 @@ class CommentCrawler:
         self._tls_engine: str = ""  # "curl_cffi" 或 "requests"
         # 进度回调
         self._progress_cb = None
+        # 速率配置默认值；GUI/CLI 可通过 configure() 覆盖
+        self._cfg_rate_base = 1.5
+        self._cfg_rate_jitter = 1.0
+        self._cfg_snooze_min = 10
+        self._cfg_auto_tune = False
+        self._cfg_auto_snooze = True
 
     # ── 初始化 ──
 
@@ -915,67 +937,108 @@ class CommentCrawler:
 
     # ── 爬取一级评论 ──
 
-    def crawl_root_comments(self, oid: int, ctype: int = 1) -> int:
-        """
-        爬取某个评论区的一级评论 (逐页)。
+    def _fetch_cursor_page(self, oid: int, ctype: int, mode: int,
+                           seek_rpid: int = 0) -> tuple[list[dict], dict, bool]:
+        """调用 cursor API (wbi/main) 获取一页评论。返回 (replies, cursor, ok)。"""
+        referer = f"https://www.bilibili.com/video/av{oid}/"
+        params = {"type": ctype, "oid": oid, "mode": mode,
+                  "ps": _CURSOR_PAGE_SIZE, "plat": 1}
+        if seek_rpid:
+            params["seek_rpid"] = seek_rpid
+        result = self._signed_get(_CURSOR_API_URL, params, referer=referer)
+        if result is None:
+            return [], {}, False
+        data = result.get("data")
+        if data is None:
+            return [], {}, True
+        return data.get("replies") or [], data.get("cursor") or {}, True
 
-        参数:
-            oid: 评论区 ID (视频 = aid)
-            ctype: 评论区类型 (1 = 视频)
-
-        返回:
-            实际爬取的一级评论数
-        """
-        progress = self.db.get_progress(oid, ctype)
-        if progress["status"] == "done":
-            print(f"    aid={oid}: 已完成,跳过")
-            return progress.get("total_root", 0)
-
-        start_page = progress["root_pages_done"] + 1
-        crawled = 0
-        page_num = start_page
-
-        while True:
+    def _crawl_root_with_cursor(self, oid: int, ctype: int,
+                                  existing_rpids: set[int]) -> tuple[int, int, bool]:
+        """使用 cursor API 双模式采集。返回 (新增数, all_count, 是否截断)。"""
+        best_all_count = 0
+        total_new = 0
+        for mode in _CURSOR_MODES:
             if self._cancelled:
                 break
+            seek_rpid = 0
+            consecutive_empty = 0
+            while consecutive_empty < _CURSOR_MAX_EMPTY:
+                if self._cancelled:
+                    break
+                replies, cursor, ok = self._fetch_cursor_page(oid, ctype, mode, seek_rpid)
+                if not ok:
+                    break
+                all_count = cursor.get("all_count", 0)
+                if all_count > best_all_count:
+                    best_all_count = all_count
+                if not replies:
+                    break
+                now = int(time.time())
+                records = []
+                oldest_ctime = None
+                has_new = False
+                for r in replies:
+                    rpid = r["rpid"]
+                    if rpid in existing_rpids:
+                        continue
+                    ctime = r["ctime"]
+                    oldest_ctime = ctime
+                    if not self._is_comment_in_range(ctime):
+                        continue
+                    existing_rpids.add(rpid)
+                    records.append(CommentRecord(
+                        rpid=rpid, oid=oid, type=ctype,
+                        mid=r["mid"], parent=0, root=0,
+                        ctime=ctime,
+                        message=r.get("content", {}).get("message", ""),
+                        like_count=r.get("like", 0),
+                        sub_count=r.get("rcount", 0),
+                        crawl_time=now,
+                    ))
+                    has_new = True
+                if records:
+                    self.db.insert_comments_batch(records)
+                    total_new += len(records)
+                prev_seek = seek_rpid
+                seek_rpid = replies[-1]["rpid"]
+                if seek_rpid == prev_seek or not has_new:
+                    consecutive_empty += 1
+                else:
+                    consecutive_empty = 0
+                if (self._since_ts and oldest_ctime is not None
+                        and oldest_ctime < self._since_ts):
+                    break
+                self._delay()
+        truncated = (best_all_count >= _ROOT_TRUNCATION_MIN_TOTAL
+                     and total_new < best_all_count * 0.8)
+        return total_new, best_all_count, truncated
 
-            params = {
-                "type": ctype, "oid": oid, "pn": page_num,
-                "ps": _PAGE_SIZE, "sort": 2,
-            }
+    def _crawl_root_fallback(self, oid: int, ctype: int) -> int:
+        """旧 pn 分页 API 兜底 (通常只返回 3 条)。"""
+        page_num = 1
+        crawled = 0
+        while page_num <= 5:
+            if self._cancelled:
+                break
             referer = f"https://www.bilibili.com/video/av{oid}/"
-
-            result = self._signed_get(
-                "https://api.bilibili.com/x/v2/reply",
-                params, referer=referer,
-            )
-
+            params = {"type": ctype, "oid": oid, "pn": page_num,
+                      "ps": _PAGE_SIZE, "sort": 2}
+            result = self._signed_get(_FALLBACK_API_URL, params, referer=referer)
             if result is None:
-                self.db.upsert_progress(oid, ctype,
-                    root_pages_done=page_num - 1,
-                    status="error",
-                    total_root=crawled,
-                )
                 break
-
-            replies = result["data"].get("replies", [])
+            data = result.get("data")
+            if data is None:
+                break
+            replies = data.get("replies") or []
             if not replies:
-                # 没有更多评论了
-                self.db.upsert_progress(oid, ctype,
-                    root_pages_done=page_num,
-                    status="done",
-                    total_root=crawled,
-                )
                 break
-
-            # 入库当前页评论 (带时间过滤)
             now = int(time.time())
             records = []
             oldest_ctime = None
             for r in replies:
                 ctime = r["ctime"]
-                oldest_ctime = ctime  # sort=2 按时间降序,最后一条最老
-                # 时间过滤: 跳过不在范围内的评论
+                oldest_ctime = ctime
                 if not self._is_comment_in_range(ctime):
                     continue
                 records.append(CommentRecord(
@@ -987,43 +1050,72 @@ class CommentCrawler:
                     sub_count=r.get("rcount", 0),
                     crawl_time=now,
                 ))
-
-            # 如果整页评论都早于 since_ts,且 since_ts 已设置,
-            # 则后续页必定更早,可以提前终止 (节省请求)
+            if records:
+                self.db.insert_comments_batch(records)
+                crawled += len(records)
             if (self._since_ts and oldest_ctime is not None
                     and oldest_ctime < self._since_ts):
-                print(f"    aid={oid}: 本页评论已早于截止时间,跳过后续页面")
-                self.db.upsert_progress(oid, ctype,
-                    root_pages_done=page_num,
-                    status="done",
-                    total_root=crawled,
-                )
                 break
-
-            inserted = self.db.insert_comments_batch(records)
-            crawled += len(records)
-
-            total = result["data"]["page"].get("acount", result["data"]["page"]["count"])
-            print(f"    aid={oid} 评论 p{page_num}: "
-                  f"获取 {len(records)} 条 (累计 {crawled}/{total})")
-
-            self.db.upsert_progress(oid, ctype,
-                root_pages_done=page_num,
-                total_root=crawled,
-                status="crawling",
-            )
-
             self._delay()
             page_num += 1
-
-        # 正常结束 (API返回空页 or 时间截断)
-        self.db.upsert_progress(oid, ctype,
-            root_pages_done=page_num,
-            status="done",
-            total_root=crawled,
-        )
-
         return crawled
+
+    def crawl_root_comments(self, oid: int, ctype: int = 1) -> int:
+        """
+        爬取某个评论区的一级评论。
+        优先使用 cursor API (wbi/main + seek_rpid),失败时回退旧 pn API。
+        all_count 远大于实际采集数 → 标记 limited 状态。
+        """
+        progress = self.db.get_progress(oid, ctype)
+        if progress["status"] == "done":
+            print(f"    aid={oid}: 已完成,跳过")
+            return progress.get("total_root", 0)
+        if progress["status"] == "limited":
+            print(f"    aid={oid}: 之前为 limited,重新从头采集...")
+            progress = {"root_pages_done": 0, "sub_progress": "{}",
+                        "status": "pending", "total_root": 0, "total_subs": 0}
+        existing_rows = self.db.conn.execute(
+            "SELECT rpid FROM comments WHERE oid=? AND type=? AND parent=0",
+            (oid, ctype),
+        ).fetchall()
+        existing_rpids: set[int] = {row[0] for row in existing_rows}
+        final_status = "done"
+        total_crawled = 0
+        total_in_db = 0
+        try:
+            new_count, best_all_count, truncated = self._crawl_root_with_cursor(
+                oid, ctype, existing_rpids)
+            total_crawled += new_count
+            total_in_db = self.db.conn.execute(
+                "SELECT COUNT(*) FROM comments WHERE oid=? AND type=? AND parent=0",
+                (oid, ctype)).fetchone()[0]
+            if truncated:
+                final_status = "limited"
+                print(f"    aid={oid}: 接口截断,已采集 {total_in_db}/{best_all_count} 条,标记为 limited")
+            else:
+                final_status = "done"
+                print(f"    aid={oid}: cursor 采集完成,共 {total_in_db} 条一级评论")
+        except Exception as e:
+            print(f"    aid={oid}: cursor API 失败 ({e}),回退旧 API...")
+            fallback_count = self._crawl_root_fallback(oid, ctype)
+            total_crawled += fallback_count
+            total_in_db = self.db.conn.execute(
+                "SELECT COUNT(*) FROM comments WHERE oid=? AND type=? AND parent=0",
+                (oid, ctype)).fetchone()[0]
+            if fallback_count > 0:
+                final_status = "limited"
+                print(f"    aid={oid}: 旧接口仅 {fallback_count} 条,标记为 limited")
+            else:
+                final_status = "error"
+        if final_status == "limited":
+            self.db.upsert_progress(oid, ctype,
+                root_pages_done=0, status="limited", total_root=total_in_db)
+        else:
+            pages_done = progress.get("root_pages_done", 0) + 1
+            self.db.upsert_progress(oid, ctype,
+                root_pages_done=pages_done, status=final_status,
+                total_root=total_in_db)
+        return total_crawled
 
     # ── 爬取子评论 ──
 
@@ -1209,6 +1301,14 @@ class CommentCrawler:
                 # 爬一级评论
                 root_crawled = self.crawl_root_comments(aid)
                 total_root += root_crawled
+
+                root_status = self.db.get_progress(aid).get("status")
+                if root_status == "limited":
+                    print(f"    aid={aid}: 一级评论疑似被接口截断,跳过子评论并保留待重试状态")
+                    continue
+                if root_status == "error":
+                    print(f"    aid={aid}: 一级评论爬取失败,跳过子评论")
+                    continue
 
                 # 爬子评论
                 sub_crawled = self.crawl_sub_comments(aid)
