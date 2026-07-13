@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 from pathlib import Path
 import sqlite3
@@ -52,11 +53,33 @@ def normalize_record(record: dict, source: Path, line_no: int) -> tuple:
     return tuple(record[key] for key in COMMENT_COLUMNS)
 
 
+def expand_input_files(patterns: list[str]) -> list[Path]:
+    files: list[Path] = []
+    seen: set[Path] = set()
+
+    for pattern in patterns:
+        matches = sorted(Path(match) for match in glob.glob(pattern))
+        if not matches:
+            path = Path(pattern)
+            if path.exists():
+                matches = [path]
+            else:
+                raise SystemExit(f"Dataset not found: {pattern}")
+
+        for path in matches:
+            resolved = path.resolve()
+            if resolved not in seen:
+                files.append(path)
+                seen.add(resolved)
+
+    return files
+
+
 def import_file(conn: sqlite3.Connection, path: Path) -> tuple[int, int]:
     read_count = 0
     before = conn.total_changes
 
-    with path.open("r", encoding="utf-8") as fh:
+    with path.open("r", encoding="utf-8-sig") as fh:
         with conn:
             for line_no, line in enumerate(fh, 1):
                 line = line.strip()
@@ -79,11 +102,9 @@ def main() -> None:
 
     total_read = 0
     total_inserted = 0
+    files = expand_input_files(args.files)
     with sqlite3.connect(db_path) as conn:
-        for raw_file in args.files:
-            path = Path(raw_file)
-            if not path.exists():
-                raise SystemExit(f"Dataset not found: {path}")
+        for path in files:
             read_count, inserted = import_file(conn, path)
             total_read += read_count
             total_inserted += inserted

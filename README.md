@@ -119,7 +119,13 @@ python crawl_comments.py 2 --days 30 --max-videos 5
 
 不要直接提交 `data/comments.db`。SQLite 数据库是二进制文件，多人修改后很难用 Git 合并；本项目改用 `datasets/*.jsonl` 作为可提交的数据交换格式。
 
-导出本地评论：
+导出本地全部评论：
+
+```bash
+python tools/export_comments.py --out datasets/comments_all.jsonl
+```
+
+按用户导出本地评论：
 
 ```bash
 python tools/export_comments.py --uid 2 --out datasets/comments_uid_2.jsonl
