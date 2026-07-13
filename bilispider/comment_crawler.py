@@ -69,7 +69,9 @@ _PAUSE_RISK = 90.0         # -412 风控拦截
 _ROOT_TRUNCATION_MIN_TOTAL = 50  # 总量明显大于返回量时,判定疑似接口截断
 _SUSPECT_DONE_MAX_ROOT = 3  # 旧接口游客态误标完成时通常只保存 0~3 条一级评论
 _REFRESH_THRESHOLD = 100    # 远端总量 - 本地总量 >= 此值时触发增量重爬
-_GROWTH_CHECK_FETCH_ALLOW = True  # 远端总量检查允许做一次轻量 API 请求
+_GROWTH_CHECK_BUDGET = 20         # 每轮最多远端检查 20 个已完成视频
+_GROWTH_CHECK_TTL = 86400         # 远端检查缓存有效期 (秒): 24 小时
+_RECENT_VIDEO_WINDOW = 50         # 只对视频列表前 50 个近期视频做远端检查
 
 # ─── 评论 API 端点 ────────────────────────────────────────────
 # B站网页端评论接口已经改用 cursor 分页 (seek_rpid),旧 pn 分页已部分失效。
@@ -505,6 +507,7 @@ class CommentDatabase:
                 total_root      INTEGER DEFAULT 0,
                 total_subs      INTEGER DEFAULT 0,
                 remote_total    INTEGER DEFAULT 0,
+                remote_checked_at INTEGER DEFAULT 0,
                 PRIMARY KEY (oid, type)
             );
         """)
@@ -515,6 +518,13 @@ class CommentDatabase:
             )
         except sqlite3.OperationalError:
             pass  # 列已存在
+        # 轻量迁移: 为旧数据库补加 remote_checked_at 列
+        try:
+            self.conn.execute(
+                "ALTER TABLE crawl_progress ADD COLUMN remote_checked_at INTEGER DEFAULT 0"
+            )
+        except sqlite3.OperationalError:
+            pass
 
     # ── 评论写入 ──
 
@@ -556,7 +566,7 @@ class CommentDatabase:
         ).fetchone()
         if row is None:
             return {"root_pages_done": 0, "sub_progress": "{}", "status": "pending",
-                    "total_root": 0, "total_subs": 0, "remote_total": 0}
+                    "total_root": 0, "total_subs": 0, "remote_total": 0, "remote_checked_at": 0}
         return {
             "root_pages_done": row[2],
             "sub_progress": row[3],
@@ -565,6 +575,7 @@ class CommentDatabase:
             "total_root": row[6] or 0,
             "total_subs": row[7] or 0,
             "remote_total": row[8] or 0,
+            "remote_checked_at": row[9] or 0,
         }
 
     def upsert_progress(self, oid: int, ctype: int, **kwargs) -> None:
@@ -579,7 +590,7 @@ class CommentDatabase:
             sets = []
             vals = []
             for key in ("root_pages_done", "sub_progress", "status",
-                         "total_root", "total_subs", "remote_total"):
+                         "total_root", "total_subs", "remote_total", "remote_checked_at"):
                 if key in kwargs:
                     sets.append(f"{key}=?")
                     vals.append(kwargs[key])
@@ -593,8 +604,8 @@ class CommentDatabase:
         else:
             self.conn.execute(
                 """INSERT INTO crawl_progress
-                   (oid, type, root_pages_done, sub_progress, last_crawl, status, total_root, total_subs, remote_total)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (oid, type, root_pages_done, sub_progress, last_crawl, status, total_root, total_subs, remote_total, remote_checked_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (oid, ctype,
                  kwargs.get("root_pages_done", 0),
                  kwargs.get("sub_progress", "{}"),
@@ -602,7 +613,8 @@ class CommentDatabase:
                  kwargs.get("status", "pending"),
                  kwargs.get("total_root", 0),
                  kwargs.get("total_subs", 0),
-                 kwargs.get("remote_total", 0)),
+                 kwargs.get("remote_total", 0),
+                 kwargs.get("remote_checked_at", 0)),
             )
         self.conn.commit()
 
@@ -719,6 +731,9 @@ class CommentCrawler:
         self._proxies: list[str] = []
         # TLS 伪装
         self._tls_engine: str = ""  # "curl_cffi" 或 "requests"
+        # 远端增长检查预算控制
+        self._growth_checks_used = 0       # 本轮已使用检查次数
+        self._growth_check_disabled = False  # 风控/预算耗尽后关闭
         # 进度回调
         self._progress_cb = None
         # 速率配置默认值；GUI/CLI 可通过 configure() 覆盖
@@ -772,20 +787,47 @@ class CommentCrawler:
             return False
         return True
 
-    def _check_remote_growth(self, oid: int, ctype: int, progress: dict) -> tuple[bool, int, int]:
+    def _check_remote_growth(self, oid: int, ctype: int,
+                              progress: dict,
+                              allow_check: bool = True) -> tuple[bool, int, int]:
         """
-        检查远端评论总量是否比本地显著增长。
+        检查远端评论总量是否比本地显著增长 (TTL 缓存 + 预算控制)。
 
-        对 status='done' 的视频请求一次 wbi/main 首页获取 cursor.all_count，
-        与本地数据库总评论数（一级+子评论）对比。差值 >= _REFRESH_THRESHOLD 时
-        触发增量重爬。
+        规则:
+          1. remote_checked_at 距当前不足 _GROWTH_CHECK_TTL → 跳过 (缓存命中)
+          2. _growth_checks_used >= _GROWTH_CHECK_BUDGET → 跳过 (预算耗尽)
+          3. _growth_check_disabled → 跳过 (风控关闭)
+          4. allow_check=False → 跳过 (不在近期窗口)
 
-        返回:
-            (是否需要刷新, 远端总量, 本地总量)
-        失败时返回 (False, 0, 0)，不误重爬。
+        成功后写入 remote_total 和 remote_checked_at。
+        失败时不误重爬，不消耗预算。
         """
-        if not _GROWTH_CHECK_FETCH_ALLOW:
+        now_ts = int(time.time())
+
+        # TTL 缓存检查
+        last_checked = int(progress.get("remote_checked_at", 0) or 0)
+        if last_checked > 0 and (now_ts - last_checked) < _GROWTH_CHECK_TTL:
+            print(
+                f"    aid={oid}: 远端检查缓存未过期 (距上次 {now_ts - last_checked}s),跳过"
+            )
             return False, 0, 0
+
+        # 预算检查
+        if self._growth_checks_used >= _GROWTH_CHECK_BUDGET:
+            if not self._growth_check_disabled:
+                print("    远端检查预算已用完,本轮跳过")
+                self._growth_check_disabled = True
+            return False, 0, 0
+
+        # 风控关闭
+        if self._growth_check_disabled:
+            return False, 0, 0
+
+        # 窗口过滤
+        if not allow_check:
+            return False, 0, 0
+
+        # 实际远端请求
         try:
             referer = f"https://www.bilibili.com/video/av{oid}/"
             params = {"type": ctype, "oid": oid, "mode": 2, "ps": 1, "plat": 1}
@@ -804,20 +846,27 @@ class CommentCrawler:
                 (oid, ctype),
             ).fetchone()[0]
 
-            # 保存远端总量到进度，方便 GUI/日志展示
-            self.db.upsert_progress(oid, ctype, remote_total=remote_total)
+            self._growth_checks_used += 1
+
+            # 保存远端总量和检查时间
+            self.db.upsert_progress(
+                oid, ctype,
+                remote_total=remote_total,
+                remote_checked_at=now_ts,
+            )
 
             diff = remote_total - local_total
             need_refresh = diff >= _REFRESH_THRESHOLD
+            check_label = f"{self._growth_checks_used}/{_GROWTH_CHECK_BUDGET}"
             if need_refresh:
                 print(
-                    f"    aid={oid}: 远端总量 {remote_total}, 本地 {local_total}, "
-                    f"增量 {diff} >= {_REFRESH_THRESHOLD}, 重新补抓"
+                    f"    远端检查 {check_label}: remote={remote_total}, local={local_total}, "
+                    f"diff={diff} >= {_REFRESH_THRESHOLD}, 重新补抓"
                 )
             else:
                 print(
-                    f"    aid={oid}: 远端总量 {remote_total}, 本地 {local_total}, "
-                    f"增量 {diff}, 跳过"
+                    f"    远端检查 {check_label}: remote={remote_total}, local={local_total}, "
+                    f"diff={diff}, 跳过"
                 )
             return need_refresh, remote_total, local_total
         except Exception:
@@ -1005,6 +1054,10 @@ class CommentCrawler:
                 if resp.status_code == 412:
                     api_type = "reply" if "/reply" in url else "search" if "search" in url else "other"
                     self._rate_ctrl.on_412(url, api_type)
+                    # 412 触发风控,立即关闭本轮远端增长检查
+                    if not self._growth_check_disabled:
+                        print("    远端检查触发风控,本轮关闭增长检查")
+                        self._growth_check_disabled = True
                     state = self._rate_ctrl.get_state()
                     # 冷却模式 → 进入自适应沉睡,自动恢复
                     if state == RateController.STATE_COOLING:
@@ -1099,7 +1152,8 @@ class CommentCrawler:
 
             for v in vlist:
                 videos.append({
-                    "aid": v["aid"], "bvid": v["bvid"], "title": v["title"],
+                    "aid": v["aid"], "bvid": v["bvid"],
+                    "title": v["title"], "created": v.get("created", 0),
                 })
 
             total = result["data"]["page"]["count"]
@@ -1279,11 +1333,15 @@ class CommentCrawler:
             page_num += 1
         return crawled
 
-    def crawl_root_comments(self, oid: int, ctype: int = 1) -> int:
+    def crawl_root_comments(self, oid: int, ctype: int = 1,
+                            allow_growth_check: bool = True) -> int:
         """
         爬取某个评论区的一级评论。
         优先使用 cursor API (wbi/main + seek_rpid),失败时回退旧 pn API。
         远端总量 - 本地总量 >= 阈值时触发增量补抓。
+
+        参数:
+            allow_growth_check: 是否允许远端总量增长检查 (受预算/缓存/窗口限制)
         """
         progress = self.db.get_progress(oid, ctype)
         if progress["status"] == "done":
@@ -1298,7 +1356,8 @@ class CommentCrawler:
                 )
                 progress = self.db.get_progress(oid, ctype)
             # 2) 检查远端评论总量是否增长到需要刷新
-            elif self._check_remote_growth(oid, ctype, progress)[0]:
+            elif self._check_remote_growth(oid, ctype, progress,
+                                          allow_check=allow_growth_check)[0]:
                 print(f"    aid={oid}: 远端总量增长,重置进度重新补抓...")
                 # 保留 sub_progress 以支持子评论增量补缺口
                 old_sub = progress.get("sub_progress", "{}")
@@ -1540,8 +1599,12 @@ class CommentCrawler:
                 aid = v["aid"]
                 print(f"\n  视频 {idx}/{len(videos)}: {v['title'][:40]} (aid={aid})")
 
+                # 远端增长检查仅在近期视频窗口内允许
+                allow_growth = idx <= _RECENT_VIDEO_WINDOW
+
                 # 爬一级评论
-                root_crawled = self.crawl_root_comments(aid)
+                root_crawled = self.crawl_root_comments(
+                    aid, allow_growth_check=allow_growth)
                 total_root += root_crawled
 
                 root_status = self.db.get_progress(aid).get("status")
