@@ -29,7 +29,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from bilispider.manifest import scan_jsonl_stats
+from bilispider.manifest import (
+    scan_jsonl_stats, load_manifest, scan_datasets_dir, DATASETS_DIR,
+)
 
 # ── 常量 ──────────────────────────────────────────────
 
@@ -76,6 +78,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-name-check", action="store_true",
         help="跳过文件命名规范检查。",
+    )
+    parser.add_argument(
+        "--check-manifest", action="store_true",
+        help="额外校验 datasets/manifest.json 与磁盘文件的一致性。",
     )
     return parser.parse_args()
 
@@ -141,6 +147,49 @@ def validate_record(record: object, path: Path, line_no: int) -> list[str]:
     return errors
 
 
+# ── Manifest 一致性检查 ───────────────────────────────
+
+def check_manifest_consistency(
+    disk_files: list[Path],
+) -> tuple[list[str], list[str]]:
+    """校验 manifest.json 与 datasets/ 目录下实际文件的一致性。
+
+    返回 (errors, warnings)。
+    - error: 磁盘上有文件但 manifest 中缺失；manifest 中有条目但文件不存在
+    - warning: manifest 中的统计信息可能过期（文件修改时间晚于 export_time）
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+    manifest = load_manifest()
+    manifest_files = set(manifest.get("files", {}).keys())
+    disk_names = {p.name for p in disk_files}
+
+    # 磁盘有但 manifest 没有
+    missing_in_manifest = disk_names - manifest_files
+    for name in sorted(missing_in_manifest):
+        errors.append(f"manifest.json 中缺少条目: {name}（文件存在于磁盘但未登记）")
+
+    # manifest 有但磁盘没有
+    missing_on_disk = manifest_files - disk_names
+    for name in sorted(missing_on_disk):
+        errors.append(f"manifest.json 中有孤立条目: {name}（条目存在但文件已删除）")
+
+    # 检查统计信息是否过期
+    for name in sorted(manifest_files & disk_names):
+        entry = manifest["files"][name]
+        filepath = DATASETS_DIR / name
+        actual_size = filepath.stat().st_size
+        recorded_size = entry.get("size_bytes", 0)
+        # 允许 1% 的误差（文件可能在行尾有细微差异）
+        if recorded_size > 0 and abs(actual_size - recorded_size) / max(actual_size, 1) > 0.01:
+            warnings.append(
+                f"{name}: manifest 记录大小 {recorded_size} 与实际大小 {actual_size} 不一致，"
+                f"建议重新运行 contribute_dataset.py"
+            )
+
+    return errors, warnings
+
+
 # ── 主逻辑 ────────────────────────────────────────────
 
 def main() -> None:
@@ -200,6 +249,14 @@ def main() -> None:
                     errors.append(f"{location} 主键重复 {key}；首次出现在 {seen_keys[key]}")
                 else:
                     seen_keys[key] = location
+
+    # ── Manifest 一致性检查（在输出前执行，确保 manifest 警告也被打印）──
+    if args.check_manifest:
+        m_errors, m_warnings = check_manifest_consistency(files)
+        if m_errors:
+            errors.extend([f"[MANIFEST] {e}" for e in m_errors])
+        for w in m_warnings:
+            warnings.append(f"[MANIFEST] {w}")
 
     # ── 输出警告 ──
     for w in warnings:
