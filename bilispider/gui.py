@@ -1670,6 +1670,8 @@ class BiliSpiderGUI:
                 args,
                 cwd=Path(__file__).resolve().parent.parent,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 capture_output=True,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
             )
@@ -1747,11 +1749,13 @@ class BiliSpiderGUI:
 
                 self.root.after(0, finish_ok)
             except Exception as exc:
-                def finish_error() -> None:
+                exc_text = str(exc)
+
+                def finish_error(message: str = exc_text) -> None:
                     self._publish_running = False
                     self._set_status("远端数据包发布失败")
-                    self._collab_append_result(f"发布失败: {exc}\n")
-                    messagebox.showerror("发布失败", str(exc), parent=self.root)
+                    self._collab_append_result(f"发布失败: {message}\n")
+                    messagebox.showerror("发布失败", message, parent=self.root)
 
                 self.root.after(0, finish_error)
 

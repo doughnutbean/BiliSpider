@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "files": {
+    "comments_all_2026-07-13.jsonl.gz": {
+      "sha256": "54d0db2ffdec14879998a073c435a6f1264e5f78e5ddfea65851105a4278b80e",
+      "size_bytes": 16208626,
+      "comments": 210469,
+      "imported_at": 1783959178,
+      "read": 210469,
+      "inserted": 0,
+      "skipped": 210469
+    }
+  },
+  "last_checked_at": 1783959364
+}
