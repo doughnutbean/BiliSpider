@@ -904,9 +904,12 @@ class BiliSpiderGUI:
         self._crawl_log.configure(state=tk.DISABLED)
 
     def _crawl_log_append(self, text: str) -> None:
+        _first, last = self._crawl_log.yview()
+        should_follow = last >= 0.995
         self._crawl_log.configure(state=tk.NORMAL)
         self._crawl_log.insert(tk.END, text)
-        self._crawl_log.see(tk.END)
+        if should_follow:
+            self._crawl_log.see(tk.END)
         self._crawl_log.configure(state=tk.DISABLED)
 
     def _try_queue_next(self) -> None:
