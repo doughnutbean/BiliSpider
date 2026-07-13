@@ -2,4 +2,7 @@ requests>=2.28.0
 qrcode[pil]>=7.4
 curl_cffi>=0.7.0
 openpyxl>=3.1
+jieba>=0.42
+wordcloud>=1.9
+Pillow>=10.0
 redis>=5.0  # 可选: haipproxy 代理池需要

@@ -32,6 +32,7 @@ from .login import (
     qr_login,
 )
 from .comment_crawler import CommentCrawler
+from .wordcloud_utils import generate_wordcloud
 from .dataset_tools import (
     export_comments as ds_export,
     import_jsonl as ds_import,
@@ -1117,6 +1118,11 @@ class BiliSpiderGUI:
                   command=lambda: self._export_to_excel_v2(uid, list(filtered_rows)),
                   bg=_COLOR_BILI_BLUE, fg="white", font=_FONT_BODY,
                   relief=tk.FLAT, padx=12, pady=2, cursor="hand2").pack(side=tk.RIGHT, padx=4)
+        tk.Button(toolbar, text="词云",
+                  command=lambda: self._generate_wordcloud_thread(uid, list(filtered_rows)),
+                  bg="#8e44ad", fg="white", font=_FONT_BODY,
+                  relief=tk.FLAT, padx=12, pady=2, cursor="hand2").pack(side=tk.RIGHT, padx=4)
+
 
         def _row_search_text(r: dict) -> str:
             level = self._comment_level(r)
@@ -1162,6 +1168,74 @@ class BiliSpiderGUI:
         tree.bind("<Double-1>", _on_double_click)
 
         self._set_status(f"检索完成: UID={uid}, {len(rows)} 条")
+
+    def _generate_wordcloud_thread(self, uid: str, rows: list[dict]) -> None:
+        """在后台线程生成词云,完成后在主线程打开预览。"""
+        if not rows:
+            messagebox.showinfo("词云", "当前没有可生成词云的数据", parent=self.root)
+            return
+
+        self._set_status("正在生成词云...")
+        import threading
+
+        def _run():
+            try:
+                png_bytes, msg = generate_wordcloud(rows)
+            except Exception as e:
+                png_bytes, msg = None, f"词云生成异常: {e}"
+            self.root.after(0, lambda: self._show_wordcloud_preview(uid, png_bytes, msg))
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+
+    def _show_wordcloud_preview(self, uid: str, png_bytes: bytes | None,
+                                 msg: str) -> None:
+        """显示词云预览窗口 (带保存按钮)。"""
+        if png_bytes is None:
+            self._set_status("词云: " + msg)
+            messagebox.showinfo("词云", msg, parent=self.root)
+            return
+
+        self._set_status(msg)
+        win = tk.Toplevel(self.root)
+        win.title(f"UID={uid} 词云")
+        win.geometry("1020x740")
+        win.configure(bg="white")
+
+        # 用 PIL 显示图片
+        from PIL import Image, ImageTk
+        from io import BytesIO
+        img = Image.open(BytesIO(png_bytes))
+        photo = ImageTk.PhotoImage(img)
+
+        label = tk.Label(win, image=photo, bg="white")
+        label.image = photo  # 保持引用防止 GC
+        label.pack(fill=tk.BOTH, expand=True)
+
+        # 底部工具栏
+        bar = tk.Frame(win, bg="white")
+        bar.pack(fill=tk.X, padx=10, pady=(0, 10))
+        tk.Label(bar, text=msg, font=("Microsoft YaHei", 9),
+                 bg="white", fg="#888").pack(side=tk.LEFT)
+
+        def _save():
+            default_name = f"uid_{uid}_wordcloud.png"
+            filepath = filedialog.asksaveasfilename(
+                parent=win, defaultextension=".png",
+                filetypes=[("PNG 图片", "*.png")],
+                initialfile=default_name,
+            )
+            if filepath:
+                try:
+                    with open(filepath, "wb") as f:
+                        f.write(png_bytes)
+                    messagebox.showinfo("保存成功", f"词云已保存到:\n{filepath}", parent=win)
+                except Exception as e:
+                    messagebox.showerror("保存失败", str(e), parent=win)
+
+        tk.Button(bar, text="保存PNG", command=_save,
+                  bg="#8e44ad", fg="white", font=("Microsoft YaHei", 10),
+                  relief=tk.FLAT, padx=16, pady=4, cursor="hand2").pack(side=tk.RIGHT)
 
     def _clear_filter(self, tree: ttk.Treeview, rows: list[dict],
                       filter_entry: tk.Entry, count_var: tk.StringVar) -> None:

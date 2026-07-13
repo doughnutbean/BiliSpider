@@ -21,6 +21,8 @@ datas += copy_metadata("curl_cffi")
 datas += copy_metadata("qrcode")
 datas += copy_metadata("Pillow")
 datas += copy_metadata("openpyxl")
+datas += copy_metadata("jieba")
+datas += copy_metadata("wordcloud")
 
 binaries = []
 binaries += collect_dynamic_libs("curl_cffi")
@@ -34,6 +36,10 @@ hiddenimports += [
     "qrcode",
     "qrcode.image.pil",
     "openpyxl",
+    "jieba",
+    "jieba.analyse",
+    "wordcloud",
+    "wordcloud.wordcloud",
 ]
 
 
