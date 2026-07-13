@@ -27,6 +27,7 @@ from .login import (
     qr_login,
 )
 from .comment_crawler import CommentCrawler
+from .paths import CONFIG_PATH, CRAWL_QUEUE_PATH, COMMENTS_DB_PATH, ensure_data_dir
 from .wbi import enc_wbi, get_wbi_keys
 
 # ─── 颜色 / 字体常量 ─────────────────────────────────────────
@@ -65,9 +66,7 @@ class BiliSpiderGUI:
         self._login_status_var = tk.StringVar(value="未登录")
         self._status_bar_var = tk.StringVar(value="就绪")
 
-        self._config_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json"
-        )
+        self._config_path = str(CONFIG_PATH)
 
         self._build_ui()
         self._load_config()
@@ -77,7 +76,7 @@ class BiliSpiderGUI:
     # ─── 配置持久化 ─────────────────────────────────────────────
 
     def _load_config(self) -> None:
-        """从 config.json 恢复上次填入的数据。"""
+        """从 data/config.json 恢复上次填入的数据。"""
         try:
             with open(self._config_path, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
@@ -101,7 +100,7 @@ class BiliSpiderGUI:
             pass
 
     def _save_config(self) -> None:
-        """保存当前GUI输入值到 config.json。"""
+        """保存当前 GUI 输入值到 data/config.json。"""
         cfg = {
             "query_uid": self._uid_entry.get().strip(),
             "crawl_uid": self._crawl_uid_entry.get().strip(),
@@ -116,6 +115,7 @@ class BiliSpiderGUI:
             "auto_snooze": self._auto_snooze_var.get(),
         }
         try:
+            ensure_data_dir()
             with open(self._config_path, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
         except Exception:
@@ -130,7 +130,7 @@ class BiliSpiderGUI:
 
     @property
     def _queue_path(self) -> str:
-        return os.path.join(os.path.dirname(self._config_path), "crawl_queue.json")
+        return str(CRAWL_QUEUE_PATH)
 
     def _load_queue(self) -> list[str]:
         try:
@@ -141,6 +141,7 @@ class BiliSpiderGUI:
             return []
 
     def _save_queue(self, uids: list[str]) -> None:
+        ensure_data_dir()
         with open(self._queue_path, "w", encoding="utf-8") as f:
             json.dump(uids, f, ensure_ascii=False)
 
@@ -750,7 +751,7 @@ class BiliSpiderGUI:
         import os, sqlite3, time, requests
 
         # 1. 本地DB查询
-        db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "comments.db")
+        db_path = str(COMMENTS_DB_PATH)
         local_rows: list[dict] = []
         if os.path.exists(db_path):
             conn = sqlite3.connect(db_path)

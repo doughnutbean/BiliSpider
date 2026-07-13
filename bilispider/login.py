@@ -5,7 +5,7 @@ B站登录模块 —— 扫码登录 + Cookie 持久化管理。
   1. 调用 B站二维码生成接口,获取登录二维码 URL 和 qrcode_key
   2. 在终端以 ASCII 形式打印二维码,用户用 B站 App 扫码
   3. 轮询扫码状态: 等待扫码 → 扫码成功 → 收集 Cookie
-  4. 校验登录态,将有效 Cookie 持久化到项目根目录的 cookies.json
+  4. 校验登录态,将有效 Cookie 持久化到 data/cookies.json
 
 参考来源: biliskin 项目 (E:\\file\\school\\code\\biliskin)
 """
@@ -20,12 +20,14 @@ from typing import Callable, Optional
 
 import requests
 
+from .paths import COOKIES_PATH, ensure_data_dir
+
 # 状态回调类型: 用于向调用方报告登录进度
 StatusCallback = Optional[Callable[[str], None]]
 
 # 项目根目录 (bilispider 包的上层目录)
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_COOKIES_PATH = os.path.join(_PROJECT_ROOT, "cookies.json")
+_COOKIES_PATH = str(COOKIES_PATH)
 
 # B站通用请求头
 _COMMON_HEADERS = {
@@ -40,13 +42,13 @@ _COMMON_HEADERS = {
 
 
 def get_cookies_path() -> str:
-    """返回 cookies.json 的绝对路径。"""
+    """返回 data/cookies.json 的绝对路径。"""
     return _COOKIES_PATH
 
 
 def load_cookies() -> dict[str, str]:
     """
-    从 cookies.json 加载已保存的 Cookie。
+    从 data/cookies.json 加载已保存的 Cookie。
 
     返回:
         键为 Cookie 名称、值为 Cookie 值的字典。
@@ -65,13 +67,14 @@ def load_cookies() -> dict[str, str]:
 
 def save_cookies(cookies: dict[str, str]) -> None:
     """
-    将 Cookie 字典持久化到 cookies.json。
+    将 Cookie 字典持久化到 data/cookies.json。
 
     参数:
         cookies: Cookie 名称到值的映射字典
     """
     # 只保留有值的 Cookie 条目
     cleaned = {k: v for k, v in cookies.items() if v}
+    ensure_data_dir()
     with open(_COOKIES_PATH, "w", encoding="utf-8") as fh:
         json.dump(cleaned, fh, ensure_ascii=False, indent=2)
 
@@ -83,7 +86,7 @@ def get_cookie_string(cookies: dict[str, str] | None = None) -> str:
     格式: "key1=value1; key2=value2; ..."
 
     参数:
-        cookies: 若为 None,则自动从 cookies.json 加载
+        cookies: 若为 None,则自动从 data/cookies.json 加载
     """
     if cookies is None:
         cookies = load_cookies()
@@ -248,7 +251,7 @@ def qr_login(
     cancel_event: threading.Event | None = None,
 ) -> bool:
     """
-    执行扫码登录流程,登录成功后自动将 Cookie 保存到 cookies.json。
+    执行扫码登录流程,登录成功后自动将 Cookie 保存到 data/cookies.json。
 
     参数:
         status_callback: 可选的进度回调函数,接收状态描述字符串

@@ -8,9 +8,9 @@
     python login.py
 
     # 第二步: 获取个人信息
-    python get_my_info.py
+    python examples/get_my_info.py
 
-Cookie 自动从 cookies.json 加载,无需手动填入。
+Cookie 自动从 data/cookies.json 加载,无需手动填入。
 """
 
 import requests
@@ -64,7 +64,7 @@ def get_my_account_info(cookie: str) -> None:
 
 # --- 主程序入口 ---
 if __name__ == "__main__":
-    # 自动从 cookies.json 加载 Cookie
+    # 自动从 data/cookies.json 加载 Cookie
     cookie = get_cookie_string()
     if not cookie:
         print("❌ 未找到有效的 Cookie。")

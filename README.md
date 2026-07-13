@@ -1,33 +1,52 @@
-# bilispider — B站数据爬取工具
+# BiliSpider
 
-基于 Python + WBI 签名鉴权的 B站数据爬取实验项目。
+BiliSpider 是一个基于 Python 的 B 站数据查询与评论爬取实验项目，包含扫码登录、WBI 签名、用户信息查询、视频列表查询、评论爬取、SQLite 持久化和 Tkinter 图形界面。
 
-复现自 [snozzz.cc - bilibili-spider](https://snozzz.cc/article/bilibili-spider)。
+> 请仅将本项目用于学习、课程实验或个人研究。批量请求 B 站接口可能触发风控，请控制频率和范围。
+
+## 功能概览
+
+- 扫码登录并保存 Cookie
+- 查询当前登录账号信息
+- 通过 UID 查询用户主页信息和视频列表
+- 按 UID 批量爬取 UP 主视频评论
+- 支持一级评论、二级评论、断点续爬和本地去重
+- GUI 支持查询、爬取、队列、速率控制、本地评论检索和导出
+- 支持 curl_cffi 浏览器 TLS 指纹模拟，缺失时自动回退到 requests
+- 支持手动代理、FlClash 本地代理和 haipproxy Redis 代理池
 
 ## 项目结构
 
-```
+```text
 bilispider/
-├── bilispider/
-│   ├── __init__.py           # 包初始化
-│   ├── login.py              # 扫码登录 + Cookie 持久化
-│   ├── wbi.py                # WBI 签名鉴权核心
-│   ├── gui.py                # Tkinter 图形化界面（三标签页）
-│   ├── comment_crawler.py    # 评论爬取引擎（数据库+速率控制+反风控）
-│   └── proxy_pool.py         # 代理池（haiproxy/手动/flclash）
-├── gui.py                    # GUI 启动入口
-├── login.py                  # 扫码登录入口
-├── crawl_comments.py         # 命令行评论爬取
-├── benchmark.py              # API 稳定性基准测试
-├── get_my_info.py            # 获取个人信息（无需签名）
-├── get_user_info.py          # 获取用户主页（需 WBI 签名）
-├── get_user_videos.py        # 获取用户视频列表（需 WBI 签名）
-├── requirements.txt          # 依赖
-├── config.json               # GUI 配置持久化
-├── cookies.json              # 登录 Cookie
-├── crawl_queue.json          # 待爬队列
-├── comments.db               # SQLite 评论数据库
-└── .gitignore
+├── bilispider/                 # 核心包
+│   ├── __init__.py
+│   ├── comment_crawler.py      # 评论爬取、速率控制、SQLite 存储
+│   ├── gui.py                  # Tkinter GUI 主界面
+│   ├── login.py                # 扫码登录与 Cookie 管理
+│   ├── paths.py                # 项目路径与 data 目录管理
+│   ├── proxy_pool.py           # 代理池
+│   └── wbi.py                  # WBI 签名
+├── data/                       # 本地运行数据，不建议提交
+│   ├── config.json             # GUI 配置
+│   ├── cookies.json            # 登录 Cookie
+│   ├── crawl_queue.json        # 待爬 UID 队列
+│   └── comments.db             # 评论数据库
+├── docs/
+│   └── reference/              # 参考资料与外部实现笔记
+├── examples/                   # 示例查询脚本
+│   ├── get_my_info.py
+│   ├── get_user_info.py
+│   └── get_user_videos.py
+├── tools/                      # 调试与检查脚本
+│   ├── check_db.py
+│   └── test_comment_api.py
+├── benchmark.py                # 爬取稳定性基准测试
+├── crawl_comments.py           # 命令行评论爬取入口
+├── gui.py                      # GUI 启动入口
+├── login.py                    # 命令行扫码登录入口
+├── requirements.txt
+└── README.md
 ```
 
 ## 快速开始
@@ -38,106 +57,79 @@ bilispider/
 pip install -r requirements.txt
 ```
 
-### 2. 图形化界面（推荐）
-
-```bash
-python gui.py
-```
-
-三标签页功能：
-
-| 标签页 | 功能 |
-|---|---|
-| 📋 用户信息 | 扫码登录 + UID 查询用户详情（粉丝/关注/获赞/播放量） |
-| 🎬 视频列表 | 查询用户视频列表，BVID/播放量 |
-| 💬 评论爬取 | UID/天数/视频数/代理配置 + 实时日志 + 进度条 + 速率控制面板 |
-
-### 3. 命令行登录
+### 2. 登录
 
 ```bash
 python login.py
 ```
 
-终端显示 ASCII 二维码，B站 App 扫码确认，Cookie 自动保存到 `cookies.json`。
+终端会显示二维码，用 B 站 App 扫码确认后，Cookie 会保存到 `data/cookies.json`。
 
-### 4. 命令行脚本
-
-所有脚本自动从 `cookies.json` 加载 Cookie。
+### 3. 启动 GUI
 
 ```bash
-python get_my_info.py                          # 个人信息
-python get_user_info.py                        # 用户主页（修改 TARGET_UID）
-python get_user_videos.py                      # 视频列表（修改 TARGET_UID + PAGE_NUM）
-python crawl_comments.py 2 --days 30 --max-videos 5  # 评论爬取
-python benchmark.py quick                      # 基准测试（quick/medium/overnight）
+python gui.py
 ```
 
-## GUI 功能详情
+GUI 会自动读取 `data/cookies.json`、`data/config.json` 和 `data/crawl_queue.json`。
 
-### 用户查询标签页
-- **扫码登录** — 弹出二维码窗口，App 扫码自动登录
-- **UID 查询** — 输入 UID，一键查询用户信息和视频列表
-- **双标签展示** — 用户信息 / 视频列表分页展示
-- **数据来源** — 合并三个 API 接口（acc/info + relation/stat + upstat）
+### 4. 使用示例脚本
 
-### 评论爬取标签页
-- **爬取配置** — UID / 最近天数(0=不限) / 最大视频数(0=不限) / 代理地址
-- **速率控制面板** — 基础延迟(s) / 抖动(s) / 沉睡时长(min) / 自适应提速开关 / 自适应沉睡开关
-- **实时状态** — 当前模式 / 延迟范围 / 请求速率(rpm) / 请求总数
-- **待爬队列** — +队列按钮添加 UID / 清空 / 自动切换 / 目标为空时取队首
-- **进度条** — 视频级别进度 + 标题显示
-- **实时日志** — 黑色终端风格，完整输出爬取过程
-- **评论检索** — 搜索框输入 UID，双源融合查询（本地 DB + 在线 API）
-  - 弹出表格窗口：时间/来源/层级/视频/评论内容
-  - 关键词过滤搜索框，实时筛选
-  - 右键菜单：复制选中行 / 全选 / Ctrl+C
-  - 导出 Excel（需 openpyxl）/ CSV 回退
-  - 双击行跳转 B站视频页面
-- **基准测试** — quick(30min) / medium(2h) / overnight(8h) 三档
-  - 实时指标（进度 / rpm / 状态）
-  - 完成后输出完整报告
-
-### 配置持久化
-- 关闭 GUI 时自动保存所有输入值到 `config.json`
-- 下次启动自动恢复：UID / 天数 / 视频数 / 代理 / 速率参数
-
-## 反风控体系
-
+```bash
+python examples/get_my_info.py
+python examples/get_user_info.py
+python examples/get_user_videos.py
 ```
-TLS层:   curl_cffi impersonate="chrome120" (回退 requests)
-HTTP层:  Sec-Ch-Ua Client Hints + 5个UA轮换 + Accept/Origin等完整头
-签名层:  WBI 动态签名 + 6小时时间缓存 + -352 异常强制刷新
-频率层:  基础延迟1.5s~2.5s + 自适应调速 + 412 状态机
-恢复层:  412x3 后自动沉睡(默认10min,自适应倍增) + 唤醒刷新Cookie/WBI/代理
-代理层:  flclash 自动检测 + 手动配置 + haiproxy Redis 代理池
+
+`get_user_info.py` 和 `get_user_videos.py` 默认查询 UID `2`，可在脚本顶部修改 `TARGET_UID` 和 `PAGE_NUM`。
+
+### 5. 命令行爬取评论
+
+```bash
+python crawl_comments.py 2 --days 30 --max-videos 5
 ```
-**状态机**：`正常 → 警戒(1~2次412) → 冷却(3+次412) → 沉睡 → 唤醒 → 正常`
 
-## 数据库（comments.db）
-
-| 表 | 说明 |
-|---|---|
-| `comments` | rpid / oid / type / mid / parent(0=一级) / root / ctime / message / like_count / crawl_time |
-| `crawl_progress` | oid / root_pages_done / sub_progress / status(pending/crawling/done) |
-
-特性：SQLite WAL 模式 / `INSERT OR IGNORE` 去重 / 断点续爬
-
-## 命令行参数（crawl_comments.py）
+常用参数：
 
 | 参数 | 说明 |
-|---|---|
-| `--days N` | 最近 N 天（0=不限） |
-| `--since YYYY-MM-DD` | 开始日期 |
-| `--until YYYY-MM-DD` | 结束日期 |
-| `--max-videos N` | 最多视频数（0=不限） |
-| `--proxy URL` | 代理地址（可多次指定轮换） |
+| --- | --- |
+| `--days N` | 只爬最近 N 天，`0` 表示不限 |
+| `--since YYYY-MM-DD` | 只爬指定日期之后 |
+| `--until YYYY-MM-DD` | 只爬指定日期之前 |
+| `--max-videos N` | 最多处理 N 个视频，`0` 表示不限 |
+| `--proxy URL` | 指定代理，可重复传入多个代理轮换 |
 
-## WBI 签名机制
+## 本地数据
 
-1. 从 `/x/web-interface/nav` 获取 `img_key` 和 `sub_key`
-2. `mixinKeyEncTab` 打乱取前 32 位为 `mixin_key`
-3. 参数排序过滤 + 时间戳 `wts`
-4. MD5 签名得到 `w_rid`
+运行时数据统一放在 `data/`：
+
+| 文件 | 说明 |
+| --- | --- |
+| `data/cookies.json` | 登录 Cookie，包含敏感信息 |
+| `data/config.json` | GUI 最近一次配置 |
+| `data/crawl_queue.json` | GUI 待爬 UID 队列 |
+| `data/comments.db` | SQLite 评论数据库 |
+
+`cookies.json`、数据库和队列文件已加入 `.gitignore`。`config.json` 目前保留在仓库中，便于保存默认 GUI 配置。
+
+## 数据库表
+
+| 表 | 说明 |
+| --- | --- |
+| `comments` | 评论明细，包含 rpid、oid、mid、parent、root、ctime、message、like_count、crawl_time |
+| `crawl_progress` | 断点续爬进度，记录视频维度的爬取状态 |
+
+数据库使用 SQLite WAL 模式，并通过 `INSERT OR IGNORE` 对评论去重。
+
+## 基准测试
+
+```bash
+python benchmark.py quick
+python benchmark.py medium
+python benchmark.py overnight
+```
+
+三种模式分别用于短测、中测和长时间稳定性测试。测试会记录请求量、成功率、风控次数和评论入库量。
 
 ## 参考来源
 

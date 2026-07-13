@@ -8,9 +8,9 @@
     python login.py
 
     # 第二步: 获取视频列表
-    python get_user_videos.py
+    python examples/get_user_videos.py
 
-Cookie 自动从 cookies.json 加载,只需在脚本中填入目标用户的 UID 和页码。
+Cookie 自动从 data/cookies.json 加载,只需在脚本中填入目标用户的 UID 和页码。
 """
 
 import requests
@@ -109,7 +109,7 @@ def get_user_videos(uid: str, cookie: str = "", page_num: int = 1) -> None:
 
 # --- 主程序入口 ---
 if __name__ == "__main__":
-    # 自动从 cookies.json 加载 Cookie
+    # 自动从 data/cookies.json 加载 Cookie
     cookie = get_cookie_string()
     if not cookie:
         print("❌ 未找到有效的 Cookie。")

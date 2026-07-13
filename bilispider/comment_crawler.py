@@ -46,13 +46,14 @@ except ImportError:
     _IMPERSONATE_TARGET = ""
 
 from .login import get_cookie_string
+from .paths import COMMENTS_DB_PATH, ensure_data_dir
 from .wbi import enc_wbi, get_wbi_keys
 
 # ─── 常量 ─────────────────────────────────────────────────────
 
 # 项目根目录
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_DB_PATH = os.path.join(_PROJECT_ROOT, "comments.db")
+_DB_PATH = str(COMMENTS_DB_PATH)
 
 # 请求频率控制 (秒)
 _MIN_DELAY = 2.0          # 最小间隔
@@ -436,6 +437,7 @@ class CommentDatabase:
         self.close()
 
     def open(self) -> None:
+        ensure_data_dir()
         self._conn = sqlite3.connect(self.db_path)
         self._conn.execute("PRAGMA journal_mode=WAL")        # 写前日志,性能更好
         self._conn.execute("PRAGMA synchronous=NORMAL")       # 平衡安全与速度

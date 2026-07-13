@@ -8,9 +8,9 @@
     python login.py
 
     # 第二步: 获取用户信息
-    python get_user_info.py
+    python examples/get_user_info.py
 
-Cookie 自动从 cookies.json 加载,只需在脚本中填入目标用户的 UID。
+Cookie 自动从 data/cookies.json 加载,只需在脚本中填入目标用户的 UID。
 """
 
 import requests
@@ -132,7 +132,7 @@ def get_user_info(uid: str, cookie: str = "") -> None:
 
 # --- 主程序入口 ---
 if __name__ == "__main__":
-    # 自动从 cookies.json 加载 Cookie
+    # 自动从 data/cookies.json 加载 Cookie
     cookie = get_cookie_string()
     if not cookie:
         print("[X] 未找到有效的 Cookie。")
