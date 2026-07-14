@@ -736,6 +736,7 @@ class CommentCrawler:
         # 远端增长检查预算控制
         self._growth_checks_used = 0       # 本轮已使用检查次数
         self._growth_check_disabled = False  # 风控/预算耗尽后关闭
+        self._sub_recheck_due_to_growth: set[int] = set()
         # 进度回调
         self._progress_cb = None
         # 速率配置默认值；GUI/CLI 可通过 configure() 覆盖
@@ -1346,6 +1347,7 @@ class CommentCrawler:
             allow_growth_check: 是否允许远端总量增长检查 (受预算/缓存/窗口限制)
         """
         progress = self.db.get_progress(oid, ctype)
+        growth_triggered = False
         if progress["status"] == "done":
             # 1) 检查是否为旧接口误标的空壳完成状态
             if self._is_trivial_root_collection(oid, ctype, progress):
@@ -1360,6 +1362,7 @@ class CommentCrawler:
             # 2) 检查远端评论总量是否增长到需要刷新
             elif self._check_remote_growth(oid, ctype, progress,
                                           allow_check=allow_growth_check)[0]:
+                growth_triggered = True
                 print(f"    aid={oid}: 远端总量增长,重置进度重新补抓...")
                 # 保留 sub_progress 以支持子评论增量补缺口
                 old_sub = progress.get("sub_progress", "{}")
@@ -1392,6 +1395,12 @@ class CommentCrawler:
             total_in_db = self.db.conn.execute(
                 "SELECT COUNT(*) FROM comments WHERE oid=? AND type=? AND parent=0",
                 (oid, ctype)).fetchone()[0]
+            if growth_triggered and new_count == 0:
+                self._sub_recheck_due_to_growth.add(oid)
+                print(
+                    f"    aid={oid}: 远端增长未发现新增一级评论,"
+                    "转为旧根子评论复查候选"
+                )
             if truncated:
                 final_status = "limited"
                 print(f"    aid={oid}: 接口截断,已采集 {total_in_db}/{best_all_count} 条,标记为 limited")
@@ -1597,17 +1606,17 @@ class CommentCrawler:
         total_crawled = 0
 
         # ── 旧根评论复查阶段 (仅远端增长触发时执行) ──
-        now_ts = int(time.time())
         if not allow_stale_recheck:
             print(
                 f"    aid={oid} 子评论复查: 未触发远端增量,跳过旧根复查"
             )
         else:
-            # 对已完成但超过 TTL 的根评论复查远端子评论是否增长
+            # 远端总量增长已经受远端检查 TTL 控制。进入这里时强制复查一批
+            # 已完成根评论,避免“一级评论无新增,旧根子评论有新增”被 TTL 再次筛掉。
             stale_candidates = []
             for rpid, sc in rows:
                 fetched, checked_at = self._read_sub_progress_entry(str(rpid), sub_progress)
-                if fetched >= sc and (checked_at == 0 or (now_ts - checked_at) >= _SUB_RECHECK_TTL):
+                if fetched >= sc:
                     stale_candidates.append((rpid, sc, fetched))
 
         if allow_stale_recheck and stale_candidates:
@@ -1636,7 +1645,9 @@ class CommentCrawler:
                     f"    aid={oid} 旧根复查完成: {rechecked_count} 个根评论有新增子评论"
                 )
             else:
-                print(f"    aid={oid} 子评论复查: 无过期旧根评论候选,跳过")
+                print(f"    aid={oid} 子评论复查: 候选旧根未发现新增")
+        elif allow_stale_recheck:
+            print(f"    aid={oid} 子评论复查: 无已完成旧根评论候选,跳过")
 
         if pending == 0:
             print(f"    aid={oid} 子评论: {len(rows)} 条根评论均已爬完,跳过")
@@ -1806,8 +1817,11 @@ class CommentCrawler:
                     print(f"    aid={aid}: 一级评论爬取失败,跳过子评论")
                     continue
 
-                # 爬子评论
-                sub_crawled = self.crawl_sub_comments(aid)
+                # 爬子评论。远端总量增长但一级评论无新增时,优先复查旧根评论的子评论。
+                allow_sub_recheck = aid in self._sub_recheck_due_to_growth
+                sub_crawled = self.crawl_sub_comments(
+                    aid, allow_stale_recheck=allow_sub_recheck)
+                self._sub_recheck_due_to_growth.discard(aid)
                 total_subs += sub_crawled
 
                 if sub_crawled:
