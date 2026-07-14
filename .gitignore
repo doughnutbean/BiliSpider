@@ -41,11 +41,18 @@ temp/
 *.tmp
 
 # Dataset scratch output
+datasets/*.jsonl
+datasets/*.jsonl.gz
+datasets/manifest.json
+datasets/bilispider-data-manifest.json
 datasets/tmp/
 datasets/temp/
 datasets/scratch/
 datasets/comments_sample*.jsonl
 datasets/test_*.jsonl
+
+# Remote sync runtime state
+data/remote_sync_state.json
 
 #agents
 codewhale-直连.bat

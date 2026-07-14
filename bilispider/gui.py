@@ -1693,6 +1693,12 @@ class BiliSpiderGUI:
                 raise RuntimeError(f"命令失败: {' '.join(args)}\n{output}")
             return completed.stdout.strip()
 
+        def is_remote_dataset_archive(name: str) -> bool:
+            return (
+                name.endswith(".jsonl.gz")
+                and (name.startswith("comments_") or name.startswith("comments_all_"))
+            )
+
         def _run() -> None:
             try:
                 out_dir = Path(self._collab_dir_var.get().strip() or "datasets")
@@ -1746,6 +1752,30 @@ class BiliSpiderGUI:
                 if not tag:
                     raise RuntimeError("无法获取 latest release tag")
                 log(f"latest release: {tag}")
+
+                log("清理 GitHub Release 中旧的远端数据压缩包...")
+                assets_output = run_checked([
+                    gh,
+                    "release",
+                    "view",
+                    tag,
+                    "--json",
+                    "assets",
+                    "--jq",
+                    ".assets[].name",
+                ])
+                old_archives = [
+                    name.strip()
+                    for name in assets_output.splitlines()
+                    if is_remote_dataset_archive(name.strip())
+                ]
+                if old_archives:
+                    for asset_name in old_archives:
+                        log(f"删除旧压缩包: {asset_name}")
+                        run_checked([gh, "release", "delete-asset", tag, asset_name, "--yes"])
+                    log(f"已清理 {len(old_archives)} 个旧压缩包")
+                else:
+                    log("未发现旧压缩包")
 
                 log("上传数据包和 manifest 到 GitHub Release...")
                 run_checked([gh, "release", "upload", tag, str(gz_path), str(manifest_path), "--clobber"])
