@@ -28,6 +28,7 @@ data/cookies.json
 data/config.json
 data/crawl_queue.json
 data/wordcloud_stopwords.txt
+data/online_cache/
 data/*.db
 data/*.db-shm
 data/*.db-wal

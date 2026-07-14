@@ -54,7 +54,7 @@ from .dataset_tools import (
     COMMENT_COLUMNS,
 )
 from .remote_sync import DEFAULT_REMOTE_MANIFEST_URL, sync_remote_datasets
-from .paths import CONFIG_PATH, CRAWL_QUEUE_PATH, COMMENTS_DB_PATH, ensure_data_dir
+from .paths import CONFIG_PATH, CRAWL_QUEUE_PATH, COMMENTS_DB_PATH, ONLINE_CACHE_DIR, ensure_data_dir
 from .wbi import enc_wbi, get_wbi_keys
 
 # ─── 颜色 / 字体常量 ─────────────────────────────────────────
@@ -76,6 +76,9 @@ _FONT_HEADING = ("Microsoft YaHei", 11, "bold")
 _FONT_BODY = ("Microsoft YaHei", 10)
 _FONT_SMALL = ("Microsoft YaHei", 9)
 _FONT_MONO = ("Consolas", 10)
+
+_ONLINE_SEARCH_PAGE_SIZE = 100
+_ONLINE_SEARCH_CACHE_TTL = 6 * 3600
 
 
 # ─── 按钮样式辅助 ──────────────────────────────────────────
@@ -164,6 +167,7 @@ class BiliSpiderGUI:
         self._crawl_proxy_entry.insert(0, cfg.get("proxy", ""))
         self._search_uid_entry.delete(0, tk.END)
         self._search_uid_entry.insert(0, cfg.get("search_uid", "2"))
+        self._search_online_limit_var.set(cfg.get("search_online_limit", "500"))
         self._rate_base_var.set(cfg.get("rate_base", "1.5"))
         self._rate_jitter_var.set(cfg.get("rate_jitter", "1.0"))
         self._snooze_var.set(cfg.get("snooze", "10"))
@@ -185,6 +189,7 @@ class BiliSpiderGUI:
             "crawl_max": self._crawl_max_var.get(),
             "proxy": self._crawl_proxy_entry.get().strip(),
             "search_uid": self._search_uid_entry.get().strip(),
+            "search_online_limit": self._search_online_limit_var.get(),
             "rate_base": self._rate_base_var.get(),
             "rate_jitter": self._rate_jitter_var.get(),
             "snooze": self._snooze_var.get(),
@@ -536,6 +541,18 @@ class BiliSpiderGUI:
         self._search_uid_entry.pack(side=tk.LEFT, padx=6)
         self._search_uid_entry.bind("<Return>", lambda _e: self._search_comments())
         _btn_primary(search_row, "搜索", self._search_comments).pack(side=tk.LEFT, padx=4)
+
+        tk.Label(search_row, text="在线上限:", font=_FONT_SMALL, bg=_COLOR_CARD).pack(side=tk.LEFT, padx=(12, 2))
+        self._search_online_limit_var = tk.StringVar(value="500")
+        tk.Spinbox(
+            search_row,
+            textvariable=self._search_online_limit_var,
+            from_=0,
+            to=10000,
+            increment=500,
+            width=7,
+            font=_FONT_SMALL,
+        ).pack(side=tk.LEFT, padx=2)
 
         self._search_count_var = tk.StringVar(value="")
         tk.Label(search_row, textvariable=self._search_count_var,
@@ -979,16 +996,57 @@ class BiliSpiderGUI:
         self._search_count_var.set("查询中...")
         threading.Thread(target=self._do_search_comments, args=(uid,), daemon=True).start()
 
+    def _online_search_cache_path(self, uid: str, pn: int) -> Path:
+        return ONLINE_CACHE_DIR / str(uid) / f"page_{pn}.json"
+
+    def _load_online_search_cache(self, uid: str, pn: int) -> dict | None:
+        path = self._online_search_cache_path(uid, pn)
+        try:
+            if not path.exists():
+                return None
+            data = json.loads(path.read_text(encoding="utf-8"))
+            cached_at = int(data.get("cached_at", 0) or 0)
+            if cached_at <= 0 or int(time.time()) - cached_at > _ONLINE_SEARCH_CACHE_TTL:
+                return None
+            return data
+        except Exception:
+            return None
+
+    def _save_online_search_cache(self, uid: str, pn: int, payload: dict) -> None:
+        try:
+            ensure_data_dir()
+            path = self._online_search_cache_path(uid, pn)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps({"cached_at": int(time.time()), "payload": payload}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _search_status_async(self, text: str) -> None:
+        self.root.after(0, lambda t=text: self._search_count_var.set(t))
+
     def _do_search_comments(self, uid: str) -> None:
         import requests
+
+        online_limit = self._to_int(self._search_online_limit_var.get(), 500)
+        online_limit = max(0, min(10000, online_limit))
+        page_size = _ONLINE_SEARCH_PAGE_SIZE
+        max_pages = (online_limit + page_size - 1) // page_size if online_limit else 0
+        online_all_count = 0
+        online_hit_limit = False
+        online_cached_pages = 0
+        online_fetched_pages = 0
+        online_partial = False
 
         db_path = str(COMMENTS_DB_PATH)
         local_rows: list[dict] = []
         if os.path.exists(db_path):
             conn = sqlite3.connect(db_path)
             rows = conn.execute(
-                "SELECT rpid, oid, ctime, message, parent FROM comments WHERE mid=? ORDER BY ctime DESC LIMIT 500",
-                (int(uid),),
+                "SELECT rpid, oid, ctime, message, parent FROM comments WHERE mid=? ORDER BY ctime DESC LIMIT ?",
+                (int(uid), max(500, online_limit or 500)),
             ).fetchall()
             conn.close()
             for rpid, oid, ctime, msg, parent in rows:
@@ -1005,70 +1063,129 @@ class BiliSpiderGUI:
         online_state = {"status": "unavailable", "message": "未请求"}
         try:
             seen_rpids = {r["rpid"] for r in local_rows}
-            for pn in range(1, 6):
-                resp = requests.get(
-                    "https://api.aicu.cc/api/v3/search/getreply",
-                    params={"uid": uid, "pn": pn, "ps": 100, "mode": 0},
-                    timeout=8,
+            if online_limit <= 0:
+                online_state = {"status": "disabled", "message": "在线补充已关闭"}
+            for pn in range(1, max_pages + 1):
+                self._search_status_async(
+                    f"本地 {len(local_rows)} 条 | 在线第 {pn}/{max_pages} 页,已新增 {len(online_rows)} 条"
                 )
-                if resp.status_code == 502:
-                    online_state = {"status": "unavailable", "message": "HTTP 502"}
-                    break
-                if resp.status_code != 200:
-                    online_state = {"status": "unavailable", "message": f"HTTP {resp.status_code}"}
-                    break
-                try:
-                    data = resp.json()
-                except Exception:
-                    online_state = {"status": "error", "message": "在线 API 返回非 JSON"}
-                    break
+                cached = self._load_online_search_cache(uid, pn)
+                if cached:
+                    data = cached.get("payload", {})
+                    online_cached_pages += 1
+                else:
+                    resp = None
+                    for attempt in range(2):
+                        resp = requests.get(
+                            "https://api.aicu.cc/api/v3/search/getreply",
+                            params={"uid": uid, "pn": pn, "ps": page_size, "mode": 0},
+                            timeout=8,
+                        )
+                        if resp.status_code != 429:
+                            break
+                        online_state = {"status": "partial", "message": "HTTP 429, 已退避重试"}
+                        self._search_status_async(
+                            f"在线第 {pn} 页触发 429,退避重试... 已新增 {len(online_rows)} 条"
+                        )
+                        time.sleep(3.0 + attempt * 5.0)
+                    if resp is None:
+                        online_state = {"status": "partial", "message": "在线 API 未响应"}
+                        online_partial = True
+                        break
+                    if resp.status_code == 502:
+                        online_state = {"status": "partial", "message": "HTTP 502"}
+                        online_partial = True
+                        break
+                    if resp.status_code == 429:
+                        online_state = {"status": "partial", "message": f"HTTP 429, 已获取 {len(online_rows)} 条在线新增"}
+                        online_partial = True
+                        break
+                    if resp.status_code != 200:
+                        online_state = {"status": "partial", "message": f"HTTP {resp.status_code}"}
+                        online_partial = True
+                        break
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        online_state = {"status": "partial", "message": "在线 API 返回非 JSON"}
+                        online_partial = True
+                        break
+                    online_fetched_pages += 1
+                    self._save_online_search_cache(uid, pn, data)
                 if data.get("code") != 0:
                     online_state = {
-                        "status": "error",
+                        "status": "partial",
                         "message": f"code={data.get('code')}: {data.get('message', 'unknown')}",
                     }
+                    online_partial = True
                     break
                 replies = data.get("data", {}).get("replies", [])
+                cursor = data.get("data", {}).get("cursor", {})
+                online_all_count = self._to_int(cursor.get("all_count"), online_all_count)
                 if not replies:
                     online_state = {"status": "empty", "message": "在线 API 无数据"}
                     break
                 online_state = {"status": "available", "message": f"第 {pn} 页可用"}
                 for r in replies:
+                    if len(online_rows) >= online_limit:
+                        online_hit_limit = True
+                        break
                     row = self._online_reply_to_row(r)
                     rpid = row["rpid"]
                     if rpid not in seen_rpids:
                         seen_rpids.add(rpid)
                         online_rows.append(row)
-                if data.get("data", {}).get("cursor", {}).get("is_end"):
+                if online_hit_limit:
                     break
-                time.sleep(0.3)
+                if cursor.get("is_end"):
+                    break
+                time.sleep(0.7)
         except requests.exceptions.Timeout:
-            online_state = {"status": "unavailable", "message": "请求超时"}
+            status = "partial" if online_rows else "unavailable"
+            online_state = {"status": status, "message": "请求超时"}
         except requests.exceptions.RequestException as exc:
-            online_state = {"status": "error", "message": str(exc)}
+            status = "partial" if online_rows else "error"
+            online_state = {"status": status, "message": str(exc)}
         except Exception as exc:
-            online_state = {"status": "error", "message": str(exc)}
+            status = "partial" if online_rows else "error"
+            online_state = {"status": status, "message": str(exc)}
 
         merged = local_rows + online_rows
         merged.sort(key=lambda x: x["ctime"], reverse=True)
         local_c = len(local_rows)
         online_c = len(online_rows)
+        cache_note = ""
+        if online_cached_pages or online_fetched_pages:
+            cache_note = f" | 缓存页 {online_cached_pages}, 新请求 {online_fetched_pages}"
 
         if not merged:
             if online_state["status"] == "empty":
                 summary = "未找到评论，本地 0 条，在线 API 无数据"
+            elif online_state["status"] == "disabled":
+                summary = "未找到评论，本地 0 条，在线补充已关闭"
             else:
                 summary = f"未找到评论，本地 0 条，在线 API 不可用：{online_state['message']}"
             self.root.after(0, lambda: self._search_count_var.set(summary))
             self.root.after(0, lambda: self._set_status(summary))
             return
 
-        if online_state["status"] == "available" and online_c > 0:
+        if online_state["status"] in ("available", "partial") and online_c > 0:
             summary = f"本地 {local_c} 条 + 在线新增 {online_c} 条 = {len(merged)} 条"
+            if online_state["status"] == "partial":
+                summary += f" | 在线部分可用：{online_state['message']}"
+            if online_hit_limit:
+                summary += f" | 在线达到上限 {online_limit}"
+                if online_all_count:
+                    summary += f" / 远端约 {online_all_count} 条"
+            summary += cache_note
         elif online_state["status"] == "available":
-            summary = f"本地 {local_c} 条 = {len(merged)} 条"
+            summary = f"本地 {local_c} 条 = {len(merged)} 条{cache_note}"
+        elif online_state["status"] == "partial":
+            summary = f"本地 {local_c} 条 = {len(merged)} 条 | 在线部分可用：{online_state['message']}{cache_note}"
         elif online_state["status"] == "empty":
-            summary = f"本地 {local_c} 条 = {len(merged)} 条 | 在线 API 无数据"
+            summary = f"本地 {local_c} 条 = {len(merged)} 条 | 在线 API 无数据{cache_note}"
+        elif online_state["status"] == "disabled":
+            summary = f"本地 {local_c} 条 = {len(merged)} 条 | 在线补充已关闭"
         else:
             summary = f"本地 {local_c} 条 = {len(merged)} 条 | 在线 API 不可用：{online_state['message']}"
 

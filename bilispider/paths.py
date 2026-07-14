@@ -29,6 +29,7 @@ COOKIES_PATH = DATA_DIR / "cookies.json"
 CONFIG_PATH = DATA_DIR / "config.json"
 CRAWL_QUEUE_PATH = DATA_DIR / "crawl_queue.json"
 COMMENTS_DB_PATH = DATA_DIR / "comments.db"
+ONLINE_CACHE_DIR = DATA_DIR / "online_cache"
 
 
 def ensure_data_dir() -> None:
