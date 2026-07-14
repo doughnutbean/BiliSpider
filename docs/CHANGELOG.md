@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.3.3
+
+- Fixed the queue label initialization so existing `crawl_queue.json` entries are shown immediately on GUI startup.
+- Hardened queue loading by accepting UTF-8 BOM files, normalizing UID values, filtering invalid entries, and removing duplicates.
+- Moved remote dataset sync controls onto their own row so the auto-sync option no longer gets squeezed out of the data collaboration page.
+- Fixed one-click export/publish error handling by decoding GitHub CLI output as UTF-8 and preserving exception text across Tkinter callbacks.
+- Updated one-click export/publish to delete old `comments_*.jsonl.gz` and `comments_all_*.jsonl.gz` assets before uploading the latest remote dataset archive.
+- Removed generated dataset snapshots and remote-sync state from Git tracking, and made the dataset checker skip ignored local JSONL assets unless they are passed explicitly.
+- Prepared the Windows installer release as `BiliSpiderSetup-0.3.3.exe`.
+
 ## v0.3.2
 
 - Added optional remote dataset synchronization for `jsonl.gz` GitHub Release assets, with first-run opt-in, manual sync, sha256 verification, and SQLite de-duplicated import.

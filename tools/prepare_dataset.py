@@ -12,6 +12,7 @@ import glob
 import json
 import re
 from pathlib import Path
+import subprocess
 import sys
 
 if sys.platform == "win32":
@@ -100,8 +101,22 @@ def _glob(pattern: str) -> list[Path]:
     return sorted(Path(match) for match in glob.glob(pattern, recursive=True))
 
 
+def is_git_ignored(path: Path) -> bool:
+    try:
+        completed = subprocess.run(
+            ["git", "check-ignore", "-q", str(path)],
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    return completed.returncode == 0
+
+
 def expand_files(patterns: list[str]) -> list[Path]:
-    if not patterns:
+    explicit_patterns = bool(patterns)
+    if not explicit_patterns:
         patterns = ["datasets/**/*.jsonl"]
     files: list[Path] = []
     seen: set[Path] = set()
@@ -116,6 +131,8 @@ def expand_files(patterns: list[str]) -> list[Path]:
                 continue
         for path in matches:
             if path.name == "manifest.json" or not path.is_file():
+                continue
+            if not explicit_patterns and is_git_ignored(path):
                 continue
             resolved = path.resolve()
             if resolved not in seen:
