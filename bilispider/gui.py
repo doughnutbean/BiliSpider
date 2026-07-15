@@ -1241,10 +1241,20 @@ class BiliSpiderGUI:
         # 工具栏
         toolbar = tk.Frame(win, bg=_COLOR_CARD)
         toolbar.pack(fill=tk.X, padx=8, pady=(8, 4))
+        toolbar.grid_columnconfigure(1, weight=1)
         tk.Label(toolbar, text=f"共 {len(rows)} 条评论", font=_FONT_HEADING,
-                 bg=_COLOR_CARD).pack(side=tk.LEFT)
-        tk.Label(toolbar, text=note, font=("Microsoft YaHei", 8),
-                 bg=_COLOR_CARD, fg="#888").pack(side=tk.LEFT, padx=10)
+                 bg=_COLOR_CARD).grid(row=0, column=0, sticky="w")
+        note_label = tk.Label(
+            toolbar,
+            text=note,
+            font=("Microsoft YaHei", 8),
+            bg=_COLOR_CARD,
+            fg="#888",
+            anchor=tk.W,
+        )
+        note_label.grid(row=0, column=1, sticky="ew", padx=10)
+        actions = tk.Frame(toolbar, bg=_COLOR_CARD)
+        actions.grid(row=0, column=2, sticky="e")
 
         # 表格（先创建，因为按钮需要引用 tree）
         tree_frame = tk.Frame(win, bg=_COLOR_CARD)
@@ -1268,7 +1278,7 @@ class BiliSpiderGUI:
         tree_frame.grid_columnconfigure(0, weight=1)
 
         # 工具栏按钮放在 tree 创建之后
-        copy_btn = tk.Button(toolbar, text="复制选中行",
+        copy_btn = tk.Button(actions, text="复制选中行",
                              command=lambda: self._copy_selected_rows(tree),
                              bg="#666", fg="white", font=_FONT_BODY,
                              relief=tk.FLAT, padx=12, pady=2, cursor="hand2")
@@ -1287,11 +1297,11 @@ class BiliSpiderGUI:
         tk.Button(filter_row, text="清除", command=lambda: self._clear_filter(tree, rows, filter_entry, filter_count_var),
                   font=("Microsoft YaHei", 8), relief=tk.FLAT, padx=8, cursor="hand2").pack(side=tk.LEFT)
 
-        tk.Button(toolbar, text="导出Excel",
+        tk.Button(actions, text="导出Excel",
                   command=lambda: self._export_to_excel_v2(uid, list(filtered_rows)),
                   bg=_COLOR_BILI_BLUE, fg="white", font=_FONT_BODY,
                   relief=tk.FLAT, padx=12, pady=2, cursor="hand2").pack(side=tk.RIGHT, padx=4)
-        tk.Button(toolbar, text="词云",
+        tk.Button(actions, text="词云",
                   command=lambda: self._generate_wordcloud_thread(uid, list(filtered_rows)),
                   bg="#8e44ad", fg="white", font=_FONT_BODY,
                   relief=tk.FLAT, padx=12, pady=2, cursor="hand2").pack(side=tk.RIGHT, padx=4)
