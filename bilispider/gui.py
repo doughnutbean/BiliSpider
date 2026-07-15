@@ -122,6 +122,8 @@ class BiliSpiderGUI:
         # 评论爬取状态
         self._crawler: Optional[CommentCrawler] = None
         self._crawling = False
+        self._crawl_run_id = 0
+        self._crawl_stdout_lock = threading.Lock()
         self._bench_runner = None
         self._current_crawl_uid: Optional[str] = None
         self._queue_continue = False
@@ -879,6 +881,8 @@ class BiliSpiderGUI:
         proxies = [p.strip() for p in proxy.split(",") if p.strip()] if proxy else []
 
         self._crawling = True
+        self._crawl_run_id += 1
+        run_id = self._crawl_run_id
         self._crawl_start_btn.configure(state=tk.DISABLED)
         self._crawl_stop_btn.configure(state=tk.NORMAL)
         self._crawl_stats_var.set("正在初始化...")
@@ -891,9 +895,18 @@ class BiliSpiderGUI:
         if proxy: self._crawl_log_append(f"代理: {proxy}\n")
         self._crawl_log_append("")
 
+        def _finish_current_run(message: str) -> None:
+            if run_id != self._crawl_run_id:
+                return
+            self._crawl_done(message, run_id=run_id)
+
         def _run():
             def _on_progress(current, total, label):
-                self.root.after(0, lambda: self._update_crawl_progress(current, total, label))
+                self.root.after(
+                    0,
+                    lambda rid=run_id: self._update_crawl_progress(current, total, label)
+                    if rid == self._crawl_run_id else None,
+                )
             crawler = CommentCrawler()
             crawler.configure(
                 since_ts=since_ts, until_ts=0, max_videos=max_videos, proxies=proxies,
@@ -907,7 +920,6 @@ class BiliSpiderGUI:
             self._crawler = crawler
 
             import io
-            old_stdout = sys.stdout
             log_buffer = io.StringIO()
             gui_log = self._crawl_log_append
             gui_root = self.root
@@ -918,22 +930,26 @@ class BiliSpiderGUI:
                 def flush(self):
                     t = log_buffer.getvalue(); log_buffer.truncate(0); log_buffer.seek(0)
                     if t: gui_root.after(0, lambda x=t: gui_log(x))
-            sys.stdout = _LW()
-            try:
-                if not crawler.setup():
-                    self.root.after(0, lambda: self._crawl_done("初始化失败: Cookie 无效"))
-                    return
-                r = crawler.crawl_by_uid(uid)
-                self.root.after(0, lambda rr=r: self._crawl_done(
-                    f"完成! 一级:{rr.get('total_root',0)} 子评论:{rr.get('total_subs',0)} 总计:{rr.get('db_total',0)}"))
-            except Exception as e:
-                self.root.after(0, lambda: self._crawl_done(f"出错: {e}"))
-            finally:
-                sys.stdout = old_stdout
+            with self._crawl_stdout_lock:
+                old_stdout = sys.stdout
+                sys.stdout = _LW()
+                try:
+                    if not crawler.setup():
+                        self.root.after(0, lambda: _finish_current_run("初始化失败: Cookie 无效"))
+                        return
+                    r = crawler.crawl_by_uid(uid)
+                    self.root.after(0, lambda rr=r: _finish_current_run(
+                        f"完成! 一级:{rr.get('total_root',0)} 子评论:{rr.get('total_subs',0)} 总计:{rr.get('db_total',0)}"))
+                except Exception as e:
+                    err = str(e)
+                    self.root.after(0, lambda msg=err: _finish_current_run(f"出错: {msg}"))
+                finally:
+                    sys.stdout = old_stdout
 
         threading.Thread(target=_run, daemon=True).start()
 
     def _stop_crawl(self) -> None:
+        self._crawl_run_id += 1
         if self._crawler:
             self._crawler.cancel()
         self._crawling = False
@@ -947,7 +963,9 @@ class BiliSpiderGUI:
         self._crawl_progress["value"] = current
         self._crawl_progress_label.configure(text=f"视频 {current}/{total}: {label}")
 
-    def _crawl_done(self, msg: str) -> None:
+    def _crawl_done(self, msg: str, run_id: int | None = None) -> None:
+        if run_id is not None and run_id != self._crawl_run_id:
+            return
         self._crawling = False
         self._crawl_start_btn.configure(state=tk.NORMAL)
         self._crawl_stop_btn.configure(state=tk.DISABLED)
@@ -957,7 +975,7 @@ class BiliSpiderGUI:
         self._crawl_log_append(f"\n=== {msg} ===\n")
         self._set_status("评论爬取 " + msg)
         self._refresh_db_status()
-        self._try_queue_next()
+        self._try_queue_next(run_id)
 
     def _crawl_log_clear(self) -> None:
         self._crawl_log.configure(state=tk.NORMAL)
@@ -973,7 +991,9 @@ class BiliSpiderGUI:
             self._crawl_log.see(tk.END)
         self._crawl_log.configure(state=tk.DISABLED)
 
-    def _try_queue_next(self) -> None:
+    def _try_queue_next(self, run_id: int | None = None) -> None:
+        if run_id is not None and run_id != self._crawl_run_id:
+            return
         if not self._queue_continue:
             return
         current = self._current_crawl_uid
@@ -984,7 +1004,13 @@ class BiliSpiderGUI:
             self._crawl_log_append(f"\n=== 队列中还有 UID={next_uid}, 自动继续... ===\n")
             self._crawl_uid_entry.delete(0, tk.END)
             self._crawl_uid_entry.insert(0, next_uid)
-            self.root.after(1000, self._start_crawl)
+            expected_run_id = self._crawl_run_id
+
+            def _start_next_if_current() -> None:
+                if expected_run_id == self._crawl_run_id and not self._crawling:
+                    self._start_crawl()
+
+            self.root.after(1000, _start_next_if_current)
 
     # ─── 评论检索逻辑 ───────────────────────────────────────────
 
