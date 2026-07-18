@@ -1,1 +1,3 @@
-# bilispider - B站数据爬取工具包
+"""BiliSpider package metadata."""
+
+__version__ = "0.3.3"

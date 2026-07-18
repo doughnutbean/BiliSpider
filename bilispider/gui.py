@@ -26,6 +26,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from datetime import datetime
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Optional
@@ -53,6 +54,7 @@ from .dataset_tools import (
     quick_validate,
     COMMENT_COLUMNS,
 )
+from .app_update import UPDATE_CHECK_INTERVAL, check_latest_release
 from .remote_sync import DEFAULT_REMOTE_MANIFEST_URL, sync_remote_datasets
 from .paths import CONFIG_PATH, CRAWL_QUEUE_PATH, COMMENTS_DB_PATH, ONLINE_CACHE_DIR, ensure_data_dir
 from .wbi import enc_wbi, get_wbi_keys
@@ -129,6 +131,7 @@ class BiliSpiderGUI:
         self._queue_continue = False
         self._wordcloud_context: dict | None = None
         self._remote_sync_running = False
+        self._app_update_check_running = False
         self._publish_running = False
         self._config: dict = {}
 
@@ -137,6 +140,8 @@ class BiliSpiderGUI:
         self._db_status_var = tk.StringVar(value="")
         self._remote_sync_enabled_var = tk.BooleanVar(value=False)
         self._remote_sync_status_var = tk.StringVar(value="远端同步: 未开启")
+        self._app_update_check_enabled_var = tk.BooleanVar(value=True)
+        self._app_update_status_var = tk.StringVar(value="软件更新: 未检查")
         self._status_bar_var = tk.StringVar(value="就绪")
 
         self._config_path = str(CONFIG_PATH)
@@ -148,6 +153,7 @@ class BiliSpiderGUI:
         self._check_login_on_start()
         self._refresh_db_status()
         self.root.after(600, self._remote_sync_startup_check)
+        self.root.after(1400, self._app_update_startup_check)
 
     # ─── 配置持久化 ─────────────────────────────────────────────
 
@@ -182,6 +188,7 @@ class BiliSpiderGUI:
         self._collab_contributor_entry.delete(0, tk.END)
         self._collab_contributor_entry.insert(0, cfg.get("contributor", ""))
         self._remote_sync_enabled_var.set(bool(cfg.get("remote_sync_enabled", False)))
+        self._app_update_check_enabled_var.set(bool(cfg.get("app_update_check_enabled", True)))
 
     def _save_config(self) -> None:
         cfg = {
@@ -203,6 +210,8 @@ class BiliSpiderGUI:
             "remote_sync_enabled": self._remote_sync_enabled_var.get(),
             "remote_sync_prompted": bool(self._config.get("remote_sync_prompted", False)),
             "remote_manifest_url": self._config.get("remote_manifest_url", DEFAULT_REMOTE_MANIFEST_URL),
+            "app_update_check_enabled": self._app_update_check_enabled_var.get(),
+            "app_update_last_checked_at": int(self._config.get("app_update_last_checked_at", 0) or 0),
         }
         self._config = cfg
         try:
@@ -507,6 +516,21 @@ class BiliSpiderGUI:
             font=_FONT_SMALL,
         ).pack(side=tk.LEFT, padx=(8, 2))
         tk.Label(sync_row, textvariable=self._remote_sync_status_var,
+                 font=_FONT_SMALL, bg=_COLOR_CARD, fg="#888").pack(side=tk.RIGHT, padx=6)
+
+        update_row = tk.Frame(self._collab_tab, bg=_COLOR_CARD)
+        update_row.pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        _btn_normal(update_row, "检查软件更新", self._app_update_manual).pack(side=tk.LEFT, padx=2)
+        tk.Checkbutton(
+            update_row,
+            text="启动时检查软件更新",
+            variable=self._app_update_check_enabled_var,
+            command=self._app_update_toggle,
+            bg=_COLOR_CARD,
+            font=_FONT_SMALL,
+        ).pack(side=tk.LEFT, padx=(8, 2))
+        tk.Label(update_row, textvariable=self._app_update_status_var,
                  font=_FONT_SMALL, bg=_COLOR_CARD, fg="#888").pack(side=tk.RIGHT, padx=6)
 
         param_row = tk.Frame(self._collab_tab, bg=_COLOR_CARD)
@@ -2050,6 +2074,84 @@ class BiliSpiderGUI:
                     self._collab_append_result(summary + "\n")
                     if not auto:
                         messagebox.showerror("远端同步失败", errors[0], parent=self.root)
+
+            self.root.after(0, finish)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _app_update_startup_check(self) -> None:
+        if not self._app_update_check_enabled_var.get():
+            self._app_update_status_var.set("软件更新: 已关闭")
+            return
+        now = int(time.time())
+        last_checked = int(self._config.get("app_update_last_checked_at", 0) or 0)
+        if last_checked and now - last_checked < UPDATE_CHECK_INTERVAL:
+            self._app_update_status_var.set("软件更新: 今日已检查")
+            return
+        self._app_update_run(auto=True)
+
+    def _app_update_toggle(self) -> None:
+        self._save_config()
+        if self._app_update_check_enabled_var.get():
+            self._app_update_status_var.set("软件更新: 已开启")
+        else:
+            self._app_update_status_var.set("软件更新: 已关闭")
+            self._set_status("已关闭启动时检查软件更新")
+
+    def _app_update_manual(self) -> None:
+        self._app_update_run(auto=False)
+
+    def _show_app_update_prompt(self, result: dict) -> None:
+        current = result.get("current_version", "")
+        latest = result.get("latest_version", "")
+        release_url = result.get("release_url", "")
+        ok = messagebox.askyesno(
+            "发现新版本",
+            f"发现 BiliSpider 新版本。\n\n当前版本: {current}\n最新版本: {latest}\n\n是否打开下载页面？",
+            parent=self.root,
+        )
+        if ok and release_url:
+            webbrowser.open(str(release_url))
+
+    def _app_update_run(self, auto: bool = False) -> None:
+        if self._app_update_check_running:
+            if not auto:
+                messagebox.showinfo("软件更新", "软件更新检查正在进行中。", parent=self.root)
+            return
+        self._app_update_check_running = True
+        self._app_update_status_var.set("软件更新: 检查中...")
+        if not auto:
+            self._set_status("正在检查软件更新...")
+
+        def _run() -> None:
+            try:
+                result = check_latest_release()
+                error = None
+            except Exception as exc:
+                result = None
+                error = str(exc)
+
+            def finish() -> None:
+                self._app_update_check_running = False
+                self._config["app_update_last_checked_at"] = int(time.time())
+                self._save_config()
+                if error:
+                    self._app_update_status_var.set("软件更新: 检查失败")
+                    self._set_status(f"软件更新检查失败: {error}")
+                    if not auto:
+                        messagebox.showerror("软件更新检查失败", error, parent=self.root)
+                    return
+
+                if result and result.get("update_available"):
+                    latest = result.get("latest_version", "")
+                    self._app_update_status_var.set(f"软件更新: 发现 {latest}")
+                    self._set_status(f"发现 BiliSpider 新版本: {latest}")
+                    self._show_app_update_prompt(result)
+                else:
+                    self._app_update_status_var.set("软件更新: 已是最新")
+                    self._set_status("软件更新: 已是最新")
+                    if not auto:
+                        messagebox.showinfo("软件更新", "当前已是最新版本。", parent=self.root)
 
             self.root.after(0, finish)
 

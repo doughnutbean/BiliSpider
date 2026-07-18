@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "0.3.3",
+    [string]$Version = "",
     [switch]$SkipInstall,
     [switch]$PortableOneFile
 )
@@ -11,6 +11,16 @@ $ProjectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $VenvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 $VenvPip = Join-Path $ProjectRoot ".venv\Scripts\pip.exe"
 $PyInstaller = Join-Path $ProjectRoot ".venv\Scripts\pyinstaller.exe"
+
+if (-not $Version) {
+    $InitPath = Join-Path $ProjectRoot "bilispider\__init__.py"
+    $VersionLine = Get-Content $InitPath | Where-Object { $_ -match '^__version__\s*=' } | Select-Object -First 1
+    if ($VersionLine -match '"([^"]+)"') {
+        $Version = $Matches[1]
+    } else {
+        throw "Could not read __version__ from $InitPath"
+    }
+}
 
 function Invoke-Checked {
     param(
