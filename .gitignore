@@ -64,3 +64,6 @@ cdp_capture.py
 
 #testfiles
 *.xlsx
+*_*评论.csv
+*_*评论_AI提示词.txt
+*_*评论词云.png
