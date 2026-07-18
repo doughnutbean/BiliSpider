@@ -507,7 +507,19 @@ class BiliSpiderGUI:
             return "aid", text
         return "", ""
 
-    def _resolve_video_input(self, value: str) -> dict:
+    def _http_get_json(self, url: str, *, params: dict | None = None,
+                       headers: dict | None = None, proxy: str = "",
+                       timeout: int = 10) -> dict:
+        session = requests.Session()
+        if proxy.strip():
+            session.proxies = {"http": proxy.strip(), "https": proxy.strip()}
+        else:
+            session.trust_env = False
+        resp = session.get(url, params=params, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _resolve_video_input(self, value: str, proxy: str = "") -> dict:
         kind, identifier = self._extract_video_identifier(value)
         if not kind:
             raise ValueError("请输入有效的 BV 号、av 号、aid 或 B站视频链接")
@@ -517,14 +529,13 @@ class BiliSpiderGUI:
             "User-Agent": "Mozilla/5.0",
             "Referer": "https://www.bilibili.com/",
         }
-        resp = requests.get(
+        data = self._http_get_json(
             "https://api.bilibili.com/x/web-interface/view",
             params=params,
             headers=headers,
+            proxy=proxy,
             timeout=10,
         )
-        resp.raise_for_status()
-        data = resp.json()
         if data.get("code") != 0:
             if kind == "aid":
                 aid = int(identifier)
@@ -1493,7 +1504,7 @@ class BiliSpiderGUI:
                             0,
                             lambda: self._crawl_log_append("正在解析视频信息...\n"),
                         )
-                        video_info = self._resolve_video_input(video_input)
+                        video_info = self._resolve_video_input(video_input, proxy=proxy)
                         self.root.after(
                             0,
                             lambda info=video_info: self._crawl_log_append(
