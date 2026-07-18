@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import gzip
 import hashlib
+import calendar
 import os
 from pathlib import Path
 import shutil
@@ -27,7 +28,7 @@ import threading
 import time
 import tkinter as tk
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timedelta
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Optional
 
@@ -169,7 +170,42 @@ class BiliSpiderGUI:
         self._uid_entry.insert(0, cfg.get("query_uid", "2"))
         self._crawl_uid_entry.delete(0, tk.END)
         self._crawl_uid_entry.insert(0, cfg.get("crawl_uid", "2"))
-        self._crawl_days_var.set(cfg.get("crawl_days", "30"))
+        default_since, default_until = self._date_defaults()
+        if "crawl_since_date" not in cfg and "crawl_days" in cfg:
+            try:
+                default_since = datetime.now() - timedelta(days=int(cfg.get("crawl_days", "30") or 30))
+            except (TypeError, ValueError):
+                pass
+        self._set_date_vars_from_string(
+            self._crawl_since_year_var,
+            self._crawl_since_month_var,
+            self._crawl_since_day_var,
+            cfg.get("crawl_since_date", ""),
+            default_since,
+        )
+        self._set_date_vars_from_string(
+            self._crawl_until_year_var,
+            self._crawl_until_month_var,
+            self._crawl_until_day_var,
+            cfg.get("crawl_until_date", ""),
+            default_until,
+        )
+        self._crawl_since_unlimited_var.set(bool(cfg.get("crawl_since_unlimited", True)))
+        self._crawl_until_today_var.set(bool(cfg.get("crawl_until_today", True)))
+        self._refresh_date_days(
+            self._crawl_since_year_var,
+            self._crawl_since_month_var,
+            self._crawl_since_day_var,
+            self._crawl_since_day_combo,
+        )
+        self._refresh_date_days(
+            self._crawl_until_year_var,
+            self._crawl_until_month_var,
+            self._crawl_until_day_var,
+            self._crawl_until_day_combo,
+        )
+        self._toggle_date_widgets(self._crawl_since_unlimited_var.get(), self._crawl_since_widgets)
+        self._toggle_date_widgets(self._crawl_until_today_var.get(), self._crawl_until_widgets)
         self._crawl_max_var.set(cfg.get("crawl_max", "5"))
         self._crawl_proxy_entry.delete(0, tk.END)
         self._crawl_proxy_entry.insert(0, cfg.get("proxy", ""))
@@ -194,7 +230,18 @@ class BiliSpiderGUI:
         cfg = {
             "query_uid": self._uid_entry.get().strip(),
             "crawl_uid": self._crawl_uid_entry.get().strip(),
-            "crawl_days": self._crawl_days_var.get(),
+            "crawl_since_date": self._date_string(
+                self._crawl_since_year_var,
+                self._crawl_since_month_var,
+                self._crawl_since_day_var,
+            ),
+            "crawl_since_unlimited": self._crawl_since_unlimited_var.get(),
+            "crawl_until_date": self._date_string(
+                self._crawl_until_year_var,
+                self._crawl_until_month_var,
+                self._crawl_until_day_var,
+            ),
+            "crawl_until_today": self._crawl_until_today_var.get(),
             "crawl_max": self._crawl_max_var.get(),
             "proxy": self._crawl_proxy_entry.get().strip(),
             "search_uid": self._search_uid_entry.get().strip(),
@@ -230,6 +277,93 @@ class BiliSpiderGUI:
     @property
     def _queue_path(self) -> str:
         return str(CRAWL_QUEUE_PATH)
+
+    def _date_defaults(self) -> tuple[datetime, datetime]:
+        today = datetime.now()
+        return today - timedelta(days=30), today
+
+    def _date_year_values(self) -> list[str]:
+        current_year = datetime.now().year
+        return [str(y) for y in range(current_year - 10, current_year + 1)]
+
+    def _set_date_vars(
+        self,
+        year_var: tk.StringVar,
+        month_var: tk.StringVar,
+        day_var: tk.StringVar,
+        date_value: datetime,
+    ) -> None:
+        year_var.set(f"{date_value.year:04d}")
+        month_var.set(f"{date_value.month:02d}")
+        day_var.set(f"{date_value.day:02d}")
+
+    def _set_date_vars_from_string(
+        self,
+        year_var: tk.StringVar,
+        month_var: tk.StringVar,
+        day_var: tk.StringVar,
+        date_text: str,
+        fallback: datetime,
+    ) -> None:
+        try:
+            value = datetime.strptime(date_text, "%Y-%m-%d")
+        except (TypeError, ValueError):
+            value = fallback
+        self._set_date_vars(year_var, month_var, day_var, value)
+
+    def _date_string(
+        self,
+        year_var: tk.StringVar,
+        month_var: tk.StringVar,
+        day_var: tk.StringVar,
+    ) -> str:
+        return f"{year_var.get()}-{month_var.get()}-{day_var.get()}"
+
+    def _refresh_date_days(
+        self,
+        year_var: tk.StringVar,
+        month_var: tk.StringVar,
+        day_var: tk.StringVar,
+        day_combo: ttk.Combobox,
+    ) -> None:
+        try:
+            year = int(year_var.get())
+            month = int(month_var.get())
+            selected_day = int(day_var.get() or "1")
+        except ValueError:
+            return
+        max_day = calendar.monthrange(year, month)[1]
+        values = [f"{d:02d}" for d in range(1, max_day + 1)]
+        day_combo.configure(values=values)
+        day_var.set(f"{min(selected_day, max_day):02d}")
+
+    def _toggle_date_widgets(
+        self,
+        disabled: bool,
+        widgets: tuple[ttk.Combobox, ttk.Combobox, ttk.Combobox],
+    ) -> None:
+        state = "disabled" if disabled else "readonly"
+        for widget in widgets:
+            widget.configure(state=state)
+
+    def _selected_date_ts(
+        self,
+        year_var: tk.StringVar,
+        month_var: tk.StringVar,
+        day_var: tk.StringVar,
+        *,
+        end_of_day: bool,
+    ) -> int:
+        hour, minute, second = (23, 59, 59) if end_of_day else (0, 0, 0)
+        value = datetime(
+            int(year_var.get()),
+            int(month_var.get()),
+            int(day_var.get()),
+            hour,
+            minute,
+            second,
+        )
+        return int(value.timestamp())
 
     def _load_queue(self) -> list[str]:
         try:
@@ -409,11 +543,6 @@ class BiliSpiderGUI:
         self._crawl_uid_entry.pack(side=tk.LEFT, padx=6)
         self._crawl_uid_entry.insert(0, "2")
 
-        tk.Label(row1, text="天数:", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT, padx=(12, 0))
-        self._crawl_days_var = tk.StringVar(value="30")
-        tk.Spinbox(row1, textvariable=self._crawl_days_var, from_=1, to=365,
-                   width=5, font=_FONT_BODY).pack(side=tk.LEFT, padx=4)
-
         tk.Label(row1, text="最大视频:", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT, padx=(12, 0))
         self._crawl_max_var = tk.StringVar(value="5")
         tk.Spinbox(row1, textvariable=self._crawl_max_var, from_=1, to=500,
@@ -422,6 +551,115 @@ class BiliSpiderGUI:
         tk.Label(row1, text="代理:", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT, padx=(12, 0))
         self._crawl_proxy_entry = tk.Entry(row1, font=_FONT_BODY, width=24)
         self._crawl_proxy_entry.pack(side=tk.LEFT, padx=6)
+
+        row_dates = tk.Frame(param_frame, bg=_COLOR_CARD)
+        row_dates.pack(fill=tk.X, pady=(0, 4))
+        years = self._date_year_values()
+        months = [f"{m:02d}" for m in range(1, 13)]
+        days = [f"{d:02d}" for d in range(1, 32)]
+
+        tk.Label(row_dates, text="开始日期:", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT)
+        self._crawl_since_year_var = tk.StringVar(value=years[-1])
+        self._crawl_since_month_var = tk.StringVar(value="01")
+        self._crawl_since_day_var = tk.StringVar(value="01")
+        self._crawl_since_year_combo = ttk.Combobox(
+            row_dates, textvariable=self._crawl_since_year_var,
+            values=years, width=6, state="readonly", font=_FONT_BODY,
+        )
+        self._crawl_since_year_combo.pack(side=tk.LEFT, padx=(4, 2))
+        tk.Label(row_dates, text="年", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT)
+        self._crawl_since_month_combo = ttk.Combobox(
+            row_dates, textvariable=self._crawl_since_month_var,
+            values=months, width=4, state="readonly", font=_FONT_BODY,
+        )
+        self._crawl_since_month_combo.pack(side=tk.LEFT, padx=(4, 2))
+        tk.Label(row_dates, text="月", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT)
+        self._crawl_since_day_combo = ttk.Combobox(
+            row_dates, textvariable=self._crawl_since_day_var,
+            values=days, width=4, state="readonly", font=_FONT_BODY,
+        )
+        self._crawl_since_day_combo.pack(side=tk.LEFT, padx=(4, 2))
+        tk.Label(row_dates, text="日", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT)
+        self._crawl_since_unlimited_var = tk.BooleanVar(value=True)
+        self._crawl_since_widgets = (
+            self._crawl_since_year_combo,
+            self._crawl_since_month_combo,
+            self._crawl_since_day_combo,
+        )
+        tk.Checkbutton(
+            row_dates,
+            text="不限起始",
+            variable=self._crawl_since_unlimited_var,
+            command=lambda: self._toggle_date_widgets(
+                self._crawl_since_unlimited_var.get(), self._crawl_since_widgets
+            ),
+            bg=_COLOR_CARD,
+            font=_FONT_BODY,
+        ).pack(side=tk.LEFT, padx=(8, 16))
+
+        tk.Label(row_dates, text="结束日期:", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT)
+        self._crawl_until_year_var = tk.StringVar(value=years[-1])
+        self._crawl_until_month_var = tk.StringVar(value="01")
+        self._crawl_until_day_var = tk.StringVar(value="01")
+        self._crawl_until_year_combo = ttk.Combobox(
+            row_dates, textvariable=self._crawl_until_year_var,
+            values=years, width=6, state="readonly", font=_FONT_BODY,
+        )
+        self._crawl_until_year_combo.pack(side=tk.LEFT, padx=(4, 2))
+        tk.Label(row_dates, text="年", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT)
+        self._crawl_until_month_combo = ttk.Combobox(
+            row_dates, textvariable=self._crawl_until_month_var,
+            values=months, width=4, state="readonly", font=_FONT_BODY,
+        )
+        self._crawl_until_month_combo.pack(side=tk.LEFT, padx=(4, 2))
+        tk.Label(row_dates, text="月", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT)
+        self._crawl_until_day_combo = ttk.Combobox(
+            row_dates, textvariable=self._crawl_until_day_var,
+            values=days, width=4, state="readonly", font=_FONT_BODY,
+        )
+        self._crawl_until_day_combo.pack(side=tk.LEFT, padx=(4, 2))
+        tk.Label(row_dates, text="日", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT)
+        self._crawl_until_today_var = tk.BooleanVar(value=True)
+        self._crawl_until_widgets = (
+            self._crawl_until_year_combo,
+            self._crawl_until_month_combo,
+            self._crawl_until_day_combo,
+        )
+        tk.Checkbutton(
+            row_dates,
+            text="至今",
+            variable=self._crawl_until_today_var,
+            command=lambda: self._toggle_date_widgets(
+                self._crawl_until_today_var.get(), self._crawl_until_widgets
+            ),
+            bg=_COLOR_CARD,
+            font=_FONT_BODY,
+        ).pack(side=tk.LEFT, padx=(8, 2))
+
+        for year_var, month_var, day_var, day_combo in (
+            (
+                self._crawl_since_year_var,
+                self._crawl_since_month_var,
+                self._crawl_since_day_var,
+                self._crawl_since_day_combo,
+            ),
+            (
+                self._crawl_until_year_var,
+                self._crawl_until_month_var,
+                self._crawl_until_day_var,
+                self._crawl_until_day_combo,
+            ),
+        ):
+            year_var.trace_add(
+                "write",
+                lambda *_args, y=year_var, m=month_var, d=day_var, c=day_combo:
+                    self._refresh_date_days(y, m, d, c),
+            )
+            month_var.trace_add(
+                "write",
+                lambda *_args, y=year_var, m=month_var, d=day_var, c=day_combo:
+                    self._refresh_date_days(y, m, d, c),
+            )
 
         # 控制按钮 + 队列
         ctrl_row = tk.Frame(param_frame, bg=_COLOR_CARD)
@@ -898,10 +1136,31 @@ class BiliSpiderGUI:
                 return
         self._queue_continue = True
         self._current_crawl_uid = uid
-        days = int(self._crawl_days_var.get() or 30)
         max_videos = int(self._crawl_max_var.get() or 5)
         proxy = self._crawl_proxy_entry.get().strip()
-        since_ts = int(time.time() - days * 86400) if days > 0 else 0
+        since_ts = 0
+        until_ts = 0
+        since_label = "不限起始"
+        until_label = "至今"
+        if not self._crawl_since_unlimited_var.get():
+            since_ts = self._selected_date_ts(
+                self._crawl_since_year_var,
+                self._crawl_since_month_var,
+                self._crawl_since_day_var,
+                end_of_day=False,
+            )
+            since_label = datetime.fromtimestamp(since_ts).strftime("%Y-%m-%d 00:00:00")
+        if not self._crawl_until_today_var.get():
+            until_ts = self._selected_date_ts(
+                self._crawl_until_year_var,
+                self._crawl_until_month_var,
+                self._crawl_until_day_var,
+                end_of_day=True,
+            )
+            until_label = datetime.fromtimestamp(until_ts).strftime("%Y-%m-%d 23:59:59")
+        if since_ts and until_ts and since_ts > until_ts:
+            messagebox.showwarning("提示", "开始日期不能晚于结束日期")
+            return
         proxies = [p.strip() for p in proxy.split(",") if p.strip()] if proxy else []
 
         self._crawling = True
@@ -914,7 +1173,7 @@ class BiliSpiderGUI:
         self._crawl_progress_label.configure(text="")
         self._crawl_log_clear()
         self._crawl_log_append(f"=== 开始爬取 UID={uid} ===\n")
-        if days: self._crawl_log_append(f"时间范围: 最近 {days} 天\n")
+        self._crawl_log_append(f"时间范围: {since_label} 到 {until_label}\n")
         if max_videos: self._crawl_log_append(f"视频限制: 最多 {max_videos} 个\n")
         if proxy: self._crawl_log_append(f"代理: {proxy}\n")
         self._crawl_log_append("")
@@ -933,7 +1192,7 @@ class BiliSpiderGUI:
                 )
             crawler = CommentCrawler()
             crawler.configure(
-                since_ts=since_ts, until_ts=0, max_videos=max_videos, proxies=proxies,
+                since_ts=since_ts, until_ts=until_ts, max_videos=max_videos, proxies=proxies,
                 progress_callback=_on_progress,
                 rate_base=float(self._rate_base_var.get() or 2.0),
                 rate_jitter=float(self._rate_jitter_var.get() or 2.0),
