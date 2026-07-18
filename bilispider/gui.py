@@ -134,6 +134,7 @@ class BiliSpiderGUI:
         self._crawl_stdout_lock = threading.Lock()
         self._bench_runner = None
         self._current_crawl_uid: Optional[str] = None
+        self._current_queue_item: dict | None = None
         self._queue_continue = False
         self._wordcloud_context: dict | None = None
         self._remote_sync_running = False
@@ -422,62 +423,99 @@ class BiliSpiderGUI:
             "title": str(item.get("title") or f"aid={aid}"),
         }
 
-    def _load_queue(self) -> list[str]:
+    def _queue_item_key(self, item: dict) -> str:
+        return f"{item.get('type', '')}:{item.get('value', '')}"
+
+    def _queue_item_label(self, item: dict) -> str:
+        item_type = str(item.get("type", ""))
+        value = str(item.get("value", "")).strip()
+        if item_type == "video":
+            preview = value[:24] + "..." if len(value) > 24 else value
+            return f"视频:{preview}"
+        return f"UID:{value}"
+
+    def _load_queue(self) -> list[dict[str, str]]:
         try:
             with open(self._queue_path, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
                 if not isinstance(data, list):
                     return []
-                queue: list[str] = []
+                queue: list[dict[str, str]] = []
                 seen: set[str] = set()
                 for item in data:
-                    uid = str(item).strip()
-                    if uid.isdigit() and uid not in seen:
-                        queue.append(uid)
-                        seen.add(uid)
+                    queue_item: dict[str, str] | None = None
+                    if isinstance(item, dict):
+                        item_type = str(item.get("type", "")).strip()
+                        value = str(item.get("value", "")).strip()
+                        if item_type in {"uid", "video"} and value:
+                            queue_item = {"type": item_type, "value": value}
+                    else:
+                        uid = str(item).strip()
+                        if uid.isdigit():
+                            queue_item = {"type": "uid", "value": uid}
+                    if queue_item is None:
+                        continue
+                    key = self._queue_item_key(queue_item)
+                    if key not in seen:
+                        queue.append(queue_item)
+                        seen.add(key)
                 return queue
         except (FileNotFoundError, json.JSONDecodeError):
             return []
 
-    def _save_queue(self, uids: list[str]) -> None:
+    def _save_queue(self, items: list[dict[str, str]]) -> None:
         ensure_data_dir()
         with open(self._queue_path, "w", encoding="utf-8") as f:
-            json.dump(uids, f, ensure_ascii=False)
+            json.dump(items, f, ensure_ascii=False)
 
     def _add_to_queue(self) -> None:
-        uid = self._crawl_uid_entry.get().strip()
-        if not uid.isdigit():
-            return
+        mode = self._crawl_mode_var.get()
+        if mode == "video":
+            video_input = self._crawl_video_entry.get().strip()
+            kind, identifier = self._extract_video_identifier(video_input)
+            if not kind or not identifier:
+                messagebox.showwarning("提示", "请输入有效的视频 BV 号、av 号、aid 或 B站视频链接")
+                return
+            item = {"type": "video", "value": video_input}
+        else:
+            uid = self._crawl_uid_entry.get().strip()
+            if not uid.isdigit():
+                messagebox.showwarning("提示", "请输入有效的 UID")
+                return
+            item = {"type": "uid", "value": uid}
         queue = self._load_queue()
-        if uid in queue:
+        key = self._queue_item_key(item)
+        if any(self._queue_item_key(existing) == key for existing in queue):
             self._refresh_queue_display()
-            self._set_status(f"UID {uid} 已在队列中")
+            self._set_status(f"{self._queue_item_label(item)} 已在队列中")
             return
-        queue.append(uid)
+        queue.append(item)
         self._save_queue(queue)
         self._refresh_queue_display()
-        self._set_status(f"UID {uid} 已加入待爬队列")
+        self._set_status(f"{self._queue_item_label(item)} 已加入待爬队列")
 
     def _clear_queue(self) -> None:
         self._save_queue([])
         self._refresh_queue_display()
         self._set_status("待爬队列已清空")
 
-    def _pop_next_uid(self) -> str | None:
+    def _peek_next_queue_item(self) -> dict[str, str] | None:
         queue = self._load_queue()
         return queue[0] if queue else None
 
-    def _remove_current_from_queue(self, uid: str) -> None:
+    def _remove_queue_item(self, item: dict[str, str]) -> None:
         queue = self._load_queue()
-        if uid in queue:
-            queue.remove(uid)
-            self._save_queue(queue)
+        key = self._queue_item_key(item)
+        filtered = [existing for existing in queue if self._queue_item_key(existing) != key]
+        if len(filtered) != len(queue):
+            self._save_queue(filtered)
         self._refresh_queue_display()
 
     def _refresh_queue_display(self) -> None:
         queue = self._load_queue()
         if queue:
-            self._queue_var.set(f"队列({len(queue)}): {' → '.join(queue[:5])}" + ("..." if len(queue) > 5 else ""))
+            labels = [self._queue_item_label(item) for item in queue[:5]]
+            self._queue_var.set(f"队列({len(queue)}): {' → '.join(labels)}" + ("..." if len(queue) > 5 else ""))
         else:
             self._queue_var.set("队列: (空)")
 
@@ -1207,20 +1245,30 @@ class BiliSpiderGUI:
         mode = self._crawl_mode_var.get()
         uid = self._crawl_uid_entry.get().strip()
         video_input = self._crawl_video_entry.get().strip()
-        if mode == "uid" and not uid.isdigit():
-            queue = self._load_queue()
-            if queue:
-                uid = queue[0]
+        queue = self._load_queue()
+        queued_item = self._peek_next_queue_item()
+        if mode == "uid" and not uid.isdigit() and queued_item:
+            mode = queued_item["type"]
+            self._crawl_mode_var.set(mode)
+            if mode == "uid":
+                uid = queued_item["value"]
                 self._crawl_uid_entry.delete(0, tk.END)
                 self._crawl_uid_entry.insert(0, uid)
             else:
+                video_input = queued_item["value"]
+                self._crawl_video_entry.delete(0, tk.END)
+                self._crawl_video_entry.insert(0, video_input)
+        if mode == "uid":
+            if not uid.isdigit():
                 messagebox.showwarning("提示", "请输入有效的 UID 或添加 UID 到待爬队列")
                 return
-        if mode == "video" and not video_input:
-            messagebox.showwarning("提示", "请输入视频 BV 号、av 号、aid 或 B站视频链接")
-            return
-        self._queue_continue = mode == "uid"
+        else:
+            if not video_input:
+                messagebox.showwarning("提示", "请输入视频 BV 号、av 号、aid 或 B站视频链接")
+                return
+        self._queue_continue = bool(queue)
         self._current_crawl_uid = uid if mode == "uid" else None
+        self._current_queue_item = {"type": mode, "value": uid if mode == "uid" else video_input}
         max_videos = int(self._crawl_max_var.get() or 5)
         proxy = self._crawl_proxy_entry.get().strip()
         since_ts = 0
@@ -1392,14 +1440,21 @@ class BiliSpiderGUI:
             return
         if not self._queue_continue:
             return
-        current = self._current_crawl_uid
+        current = self._current_queue_item
         if current:
-            self._remove_current_from_queue(current)
-        next_uid = self._pop_next_uid()
-        if next_uid:
-            self._crawl_log_append(f"\n=== 队列中还有 UID={next_uid}, 自动继续... ===\n")
-            self._crawl_uid_entry.delete(0, tk.END)
-            self._crawl_uid_entry.insert(0, next_uid)
+            self._remove_queue_item(current)
+        next_item = self._peek_next_queue_item()
+        if next_item:
+            self._crawl_log_append(
+                f"\n=== 队列中还有 {self._queue_item_label(next_item)}, 自动继续... ===\n"
+            )
+            self._crawl_mode_var.set(next_item["type"])
+            if next_item["type"] == "uid":
+                self._crawl_uid_entry.delete(0, tk.END)
+                self._crawl_uid_entry.insert(0, next_item["value"])
+            else:
+                self._crawl_video_entry.delete(0, tk.END)
+                self._crawl_video_entry.insert(0, next_item["value"])
             expected_run_id = self._crawl_run_id
 
             def _start_next_if_current() -> None:
