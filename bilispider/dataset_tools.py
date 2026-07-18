@@ -22,12 +22,12 @@ from .paths import COMMENTS_DB_PATH, ensure_data_dir
 
 COMMENT_COLUMNS = (
     "rpid", "oid", "type", "mid", "parent", "root",
-    "ctime", "message", "like_count", "sub_count", "crawl_time",
+    "ctime", "message", "picture_count", "like_count", "sub_count", "crawl_time",
 )
 
 INTEGER_COLUMNS = {
     "rpid", "oid", "type", "mid", "parent", "root",
-    "ctime", "like_count", "sub_count", "crawl_time",
+    "ctime", "picture_count", "like_count", "sub_count", "crawl_time",
 }
 
 # 推荐的文件命名模式
@@ -99,6 +99,14 @@ def export_comments(
         where.append("ctime >= ?"); params.append(since)
     if until is not None:
         where.append("ctime <= ?"); params.append(until)
+
+    try:
+        from .comment_crawler import CommentDatabase
+        with CommentDatabase(str(db_path)):
+            pass
+    except Exception as exc:
+        result["error"] = str(exc)
+        return result
 
     sql = f"SELECT {', '.join(COMMENT_COLUMNS)} FROM comments"
     if where:
@@ -249,6 +257,8 @@ def import_jsonl(
                                     f"{filepath.name}:{line_no} 不是 JSON 对象"
                                 )
                                 continue
+                            if "picture_count" not in record:
+                                record["picture_count"] = 0
                             missing = [c for c in COMMENT_COLUMNS if c not in record]
                             if missing:
                                 result["errors"].append(
@@ -365,7 +375,10 @@ def validate_jsonl_files(
                     continue
 
                 # 字段检查
-                missing = [c for c in COMMENT_COLUMNS if c not in record]
+                missing = [
+                    c for c in COMMENT_COLUMNS
+                    if c not in record and c != "picture_count"
+                ]
                 if missing:
                     result["errors"].append(f"{path.name}:{line_no} 缺少字段: {', '.join(missing)}")
                     continue
@@ -490,7 +503,10 @@ def quick_validate(filepath: Path) -> dict[str, Any]:
             if not isinstance(record, dict):
                 result["errors"].append(f"{filepath.name}:{line_no} 不是 JSON 对象")
                 continue
-            missing = [c for c in COMMENT_COLUMNS if c not in record]
+            missing = [
+                c for c in COMMENT_COLUMNS
+                if c not in record and c != "picture_count"
+            ]
             if missing:
                 result["errors"].append(f"{filepath.name}:{line_no} 缺少字段: {', '.join(missing)}")
                 continue

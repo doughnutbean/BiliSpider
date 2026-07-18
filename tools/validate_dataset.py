@@ -18,6 +18,7 @@ COMMENT_COLUMNS = (
     "root",
     "ctime",
     "message",
+    "picture_count",
     "like_count",
     "sub_count",
     "crawl_time",
@@ -31,6 +32,7 @@ INTEGER_COLUMNS = {
     "parent",
     "root",
     "ctime",
+    "picture_count",
     "like_count",
     "sub_count",
     "crawl_time",
@@ -79,7 +81,10 @@ def validate_record(record: object, path: Path, line_no: int) -> list[str]:
     if not isinstance(record, dict):
         return [f"{path}:{line_no} JSON value must be an object"]
 
-    missing = [key for key in COMMENT_COLUMNS if key not in record]
+    missing = [
+        key for key in COMMENT_COLUMNS
+        if key not in record and key != "picture_count"
+    ]
     if missing:
         errors.append(f"{path}:{line_no} missing fields: {', '.join(missing)}")
 

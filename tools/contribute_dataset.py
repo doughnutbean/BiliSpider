@@ -42,13 +42,14 @@ from bilispider.manifest import (
     update_file_entry,
     scan_jsonl_stats,
 )
+from bilispider.comment_crawler import CommentDatabase
 from bilispider.paths import COMMENTS_DB_PATH
 
 # ── 常量 ──────────────────────────────────────────────
 
 COMMENT_COLUMNS = (
     "rpid", "oid", "type", "mid", "parent", "root",
-    "ctime", "message", "like_count", "sub_count", "crawl_time",
+    "ctime", "message", "picture_count", "like_count", "sub_count", "crawl_time",
 )
 
 # 默认导出目录
@@ -143,6 +144,9 @@ def export_comments(
     if not db_path.exists():
         raise SystemExit(f"数据库不存在: {db_path}")
 
+    with CommentDatabase(str(db_path)):
+        pass
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     count = 0
 
@@ -200,6 +204,9 @@ def export_comments_append(
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     count = 0
+
+    with CommentDatabase(str(db_path)):
+        pass
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row

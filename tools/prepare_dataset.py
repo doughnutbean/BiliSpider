@@ -33,12 +33,12 @@ from bilispider.manifest import (
 
 COMMENT_COLUMNS = (
     "rpid", "oid", "type", "mid", "parent", "root",
-    "ctime", "message", "like_count", "sub_count", "crawl_time",
+    "ctime", "message", "picture_count", "like_count", "sub_count", "crawl_time",
 )
 
 INTEGER_COLUMNS = {
     "rpid", "oid", "type", "mid", "parent", "root",
-    "ctime", "like_count", "sub_count", "crawl_time",
+    "ctime", "picture_count", "like_count", "sub_count", "crawl_time",
 }
 
 NAME_PATTERNS = (
@@ -163,7 +163,10 @@ def validate_record(record: object, path: Path, line_no: int) -> list[str]:
         return [f"{prefix} JSON value must be an object"]
 
     errors: list[str] = []
-    missing = [field for field in COMMENT_COLUMNS if field not in record]
+    missing = [
+        field for field in COMMENT_COLUMNS
+        if field not in record and field != "picture_count"
+    ]
     if missing:
         errors.append(f"{prefix} missing fields: {', '.join(missing)}")
 

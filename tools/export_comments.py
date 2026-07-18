@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from bilispider.comment_crawler import CommentDatabase
 from bilispider.paths import COMMENTS_DB_PATH
 
 COMMENT_COLUMNS = (
@@ -25,6 +26,7 @@ COMMENT_COLUMNS = (
     "root",
     "ctime",
     "message",
+    "picture_count",
     "like_count",
     "sub_count",
     "crawl_time",
@@ -108,6 +110,8 @@ def main() -> None:
 
     if not db_path.exists():
         raise SystemExit(f"Database not found: {db_path}")
+    with CommentDatabase(str(db_path)):
+        pass
     if args.limit is not None and args.limit < 1:
         raise SystemExit("--limit must be greater than 0")
     if not args.split_by and not args.out:

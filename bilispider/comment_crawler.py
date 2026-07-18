@@ -438,9 +438,16 @@ class CommentRecord:
     root: int          # 根评论 rpid (0 表示一级评论)
     ctime: int         # 发布时间 (Unix 时间戳)
     message: str       # 评论内容
+    picture_count: int  # 评论附带图片数量；只保存数量，不保存图片内容/URL
     like_count: int    # 点赞数
     sub_count: int     # 子评论总数
     crawl_time: int    # 爬取时间 (Unix 时间戳)
+
+
+def _get_picture_count(reply: dict) -> int:
+    """Return the number of pictures attached to a reply payload."""
+    pictures = (reply.get("content") or {}).get("pictures") or []
+    return len(pictures) if isinstance(pictures, list) else 0
 
 
 # ─── SQLite 数据库管理 ─────────────────────────────────────────
@@ -493,6 +500,7 @@ class CommentDatabase:
                 root        INTEGER NOT NULL DEFAULT 0,
                 ctime       INTEGER NOT NULL,
                 message     TEXT,
+                picture_count INTEGER DEFAULT 0,
                 like_count  INTEGER DEFAULT 0,
                 sub_count   INTEGER DEFAULT 0,
                 crawl_time  INTEGER NOT NULL,
@@ -527,6 +535,12 @@ class CommentDatabase:
             )
         except sqlite3.OperationalError:
             pass
+        try:
+            self.conn.execute(
+                "ALTER TABLE comments ADD COLUMN picture_count INTEGER DEFAULT 0"
+            )
+        except sqlite3.OperationalError:
+            pass
 
     # ── 评论写入 ──
 
@@ -535,16 +549,18 @@ class CommentDatabase:
         self.conn.execute(
             """INSERT INTO comments
                (rpid, oid, type, mid, parent, root, ctime, message,
-                like_count, sub_count, crawl_time)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                picture_count, like_count, sub_count, crawl_time)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(rpid, oid, type) DO UPDATE SET
                    like_count=excluded.like_count,
                    sub_count=excluded.sub_count,
                    message=excluded.message,
+                   picture_count=excluded.picture_count,
                    ctime=excluded.ctime,
                    crawl_time=excluded.crawl_time""",
             (c.rpid, c.oid, c.type, c.mid, c.parent, c.root,
-             c.ctime, c.message, c.like_count, c.sub_count, c.crawl_time),
+             c.ctime, c.message, c.picture_count, c.like_count, c.sub_count,
+             c.crawl_time),
         )
 
     def insert_comments_batch(self, records: list[CommentRecord]) -> int:
@@ -1247,6 +1263,7 @@ class CommentCrawler:
                         mid=r["mid"], parent=0, root=0,
                         ctime=ctime,
                         message=r.get("content", {}).get("message", ""),
+                        picture_count=_get_picture_count(r),
                         like_count=r.get("like", 0),
                         sub_count=r.get("rcount", 0),
                         crawl_time=now,
@@ -1322,6 +1339,7 @@ class CommentCrawler:
                     mid=r["mid"], parent=0, root=0,
                     ctime=ctime,
                     message=r.get("content", {}).get("message", ""),
+                    picture_count=_get_picture_count(r),
                     like_count=r.get("like", 0),
                     sub_count=r.get("rcount", 0),
                     crawl_time=now,
@@ -1522,6 +1540,7 @@ class CommentCrawler:
                     root=root_rpid,
                     ctime=ctime,
                     message=sr.get("content", {}).get("message", ""),
+                    picture_count=_get_picture_count(sr),
                     like_count=sr.get("like", 0),
                     sub_count=0,
                     crawl_time=now,
@@ -1711,6 +1730,7 @@ class CommentCrawler:
                         root=root_rpid,
                         ctime=ctime,
                         message=r.get("content", {}).get("message", ""),
+                        picture_count=_get_picture_count(r),
                         like_count=r.get("like", 0),
                         sub_count=0,  # 二级评论不再有子评论
                         crawl_time=now,

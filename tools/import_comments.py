@@ -26,6 +26,7 @@ COMMENT_COLUMNS = (
     "root",
     "ctime",
     "message",
+    "picture_count",
     "like_count",
     "sub_count",
     "crawl_time",
@@ -50,6 +51,8 @@ def parse_args() -> argparse.Namespace:
 def normalize_record(record: dict, source: Path, line_no: int) -> tuple:
     if not isinstance(record, dict):
         raise ValueError(f"{source}:{line_no} JSON value must be an object")
+    if "picture_count" not in record:
+        record["picture_count"] = 0
     missing = [key for key in COMMENT_COLUMNS if key not in record]
     if missing:
         raise ValueError(f"{source}:{line_no} missing fields: {', '.join(missing)}")
