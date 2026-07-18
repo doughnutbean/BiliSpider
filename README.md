@@ -197,19 +197,19 @@ python tools/report_dataset.py
 推荐的 Windows 分发方式是：先用 PyInstaller 构建稳定的 `onedir` GUI 程序，再用 Inno Setup 打成单个安装程序 EXE。
 
 ```powershell
-.\packaging\build_windows.ps1 -Version 0.3.3
+.\packaging\build_windows.ps1 -Version 0.4.0
 ```
 
 输出文件：
 
 ```text
-release\BiliSpiderSetup-0.3.3.exe
+release\BiliSpiderSetup-0.4.0.exe
 ```
 
 如确实需要额外生成安装后本体也是单文件的便携 EXE：
 
 ```powershell
-.\packaging\build_windows.ps1 -Version 0.3.3 -PortableOneFile
+.\packaging\build_windows.ps1 -Version 0.4.0 -PortableOneFile
 ```
 
 默认发布只上传安装器 EXE，不上传本地数据库、Cookie、配置、`dist\`、`build\` 或 `release\` 目录。

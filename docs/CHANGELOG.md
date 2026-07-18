@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.4.0
+
+- Added startup update prompts that compare the bundled app version with the latest GitHub Release and only open the download page instead of auto-installing anything.
+- Replaced the old crawl day limit in the GUI with optional start/end date selectors, including "unlimited start" and "until today" behavior for comment time filtering.
+- Added single-video comment crawling from Bilibili `BV`, `av`, numeric `aid`, or full video URLs, and extended the queue so UID tasks and video tasks can coexist.
+- Added one-click AI export from local search results, including exported comment tables, fixed prompt templates, unified file naming, and optional cleanup of older same-user exports in the chosen folder.
+- Unified local-search export naming across comment tables, AI prompt bundles, and word cloud PNGs, while keeping runtime data, cookies, SQLite databases, configs, queues, JSONL datasets, and user stopword files out of packaged releases.
+- Prepared the Windows installer release as `BiliSpiderSetup-0.4.0.exe`.
+
 ## v0.3.3
 
 - Fixed the queue label initialization so existing `crawl_queue.json` entries are shown immediately on GUI startup.
