@@ -1868,6 +1868,51 @@ class CommentCrawler:
         finally:
             db.close()
 
+    def crawl_by_video(self, aid: int, title: str = "") -> dict:
+        """Crawl comments for a single video aid."""
+        db = self.db
+        db.open()
+
+        try:
+            label = title or f"aid={aid}"
+            print(f"\n{'='*50}")
+            print(f"  开始爬取单个视频评论: {label} (aid={aid})")
+            print(f"{'='*50}")
+
+            if self._progress_cb:
+                self._progress_cb(1, 1, label[:30])
+
+            total_root = self.crawl_root_comments(aid, allow_growth_check=True)
+            total_subs = 0
+            root_status = self.db.get_progress(aid).get("status")
+            if root_status == "limited":
+                print(f"    aid={aid}: 一级评论疑似被接口截断,跳过子评论并保留待重试状态")
+            elif root_status == "error":
+                print(f"    aid={aid}: 一级评论爬取失败,跳过子评论")
+            else:
+                allow_sub_recheck = aid in self._sub_recheck_due_to_growth
+                total_subs = self.crawl_sub_comments(
+                    aid, allow_stale_recheck=allow_sub_recheck)
+                self._sub_recheck_due_to_growth.discard(aid)
+                if total_subs:
+                    print(f"    aid={aid} 子评论: {total_subs} 条")
+
+            stats = db.get_stats()
+            print(self._rate_ctrl.dump_report())
+            print(f"\n[3/3] 单视频爬取完成!")
+            print(f"  一级评论: {total_root}")
+            print(f"  子评论  : {total_subs}")
+            print(f"  数据库总计: {stats['total']} 条")
+
+            return {
+                "total_root": total_root,
+                "total_subs": total_subs,
+                "db_total": stats["total"],
+                "videos_done": stats["videos_done"],
+            }
+        finally:
+            db.close()
+
 
 # ─── 便捷入口 ──────────────────────────────────────────────────
 

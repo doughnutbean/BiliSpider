@@ -19,6 +19,7 @@ import gzip
 import hashlib
 import calendar
 import os
+import re
 from pathlib import Path
 import shutil
 import sqlite3
@@ -31,6 +32,8 @@ import webbrowser
 from datetime import datetime, timedelta
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Optional
+
+import requests
 
 from .login import (
     get_cookie_string,
@@ -82,6 +85,8 @@ _FONT_MONO = ("Consolas", 10)
 
 _ONLINE_SEARCH_PAGE_SIZE = 100
 _ONLINE_SEARCH_CACHE_TTL = 6 * 3600
+_BV_PATTERN = re.compile(r"(BV[0-9A-Za-z]{10})", re.IGNORECASE)
+_AV_PATTERN = re.compile(r"(?:^|/)(?:av|AV)(\d+)")
 
 
 # ─── 按钮样式辅助 ──────────────────────────────────────────
@@ -170,6 +175,9 @@ class BiliSpiderGUI:
         self._uid_entry.insert(0, cfg.get("query_uid", "2"))
         self._crawl_uid_entry.delete(0, tk.END)
         self._crawl_uid_entry.insert(0, cfg.get("crawl_uid", "2"))
+        self._crawl_mode_var.set(cfg.get("crawl_mode", "uid"))
+        self._crawl_video_entry.delete(0, tk.END)
+        self._crawl_video_entry.insert(0, cfg.get("crawl_video", ""))
         default_since, default_until = self._date_defaults()
         if "crawl_since_date" not in cfg and "crawl_days" in cfg:
             try:
@@ -230,6 +238,8 @@ class BiliSpiderGUI:
         cfg = {
             "query_uid": self._uid_entry.get().strip(),
             "crawl_uid": self._crawl_uid_entry.get().strip(),
+            "crawl_mode": self._crawl_mode_var.get(),
+            "crawl_video": self._crawl_video_entry.get().strip(),
             "crawl_since_date": self._date_string(
                 self._crawl_since_year_var,
                 self._crawl_since_month_var,
@@ -364,6 +374,53 @@ class BiliSpiderGUI:
             second,
         )
         return int(value.timestamp())
+
+    def _extract_video_identifier(self, value: str) -> tuple[str, str]:
+        text = value.strip()
+        bvid_match = _BV_PATTERN.search(text)
+        if bvid_match:
+            return "bvid", bvid_match.group(1)
+        av_match = _AV_PATTERN.search(text)
+        if av_match:
+            return "aid", av_match.group(1)
+        if text.lower().startswith("av") and text[2:].isdigit():
+            return "aid", text[2:]
+        if text.isdigit():
+            return "aid", text
+        return "", ""
+
+    def _resolve_video_input(self, value: str) -> dict:
+        kind, identifier = self._extract_video_identifier(value)
+        if not kind:
+            raise ValueError("请输入有效的 BV 号、av 号、aid 或 B站视频链接")
+
+        params = {"bvid": identifier} if kind == "bvid" else {"aid": identifier}
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://www.bilibili.com/",
+        }
+        resp = requests.get(
+            "https://api.bilibili.com/x/web-interface/view",
+            params=params,
+            headers=headers,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 0:
+            if kind == "aid":
+                aid = int(identifier)
+                return {"aid": aid, "bvid": "", "title": f"aid={aid}"}
+            raise ValueError(f"视频解析失败: {data.get('message', 'unknown')}")
+        item = data.get("data") or {}
+        aid = int(item.get("aid") or 0)
+        if aid <= 0:
+            raise ValueError("视频解析失败: 未获取到 aid")
+        return {
+            "aid": aid,
+            "bvid": str(item.get("bvid") or ""),
+            "title": str(item.get("title") or f"aid={aid}"),
+        }
 
     def _load_queue(self) -> list[str]:
         try:
@@ -542,6 +599,23 @@ class BiliSpiderGUI:
         self._crawl_uid_entry = tk.Entry(row1, font=_FONT_BODY, width=16)
         self._crawl_uid_entry.pack(side=tk.LEFT, padx=6)
         self._crawl_uid_entry.insert(0, "2")
+        self._crawl_mode_var = tk.StringVar(value="uid")
+        tk.Radiobutton(
+            row1,
+            text="按UP主",
+            variable=self._crawl_mode_var,
+            value="uid",
+            bg=_COLOR_CARD,
+            font=_FONT_BODY,
+        ).pack(side=tk.LEFT, padx=(4, 0))
+        tk.Radiobutton(
+            row1,
+            text="按单个视频",
+            variable=self._crawl_mode_var,
+            value="video",
+            bg=_COLOR_CARD,
+            font=_FONT_BODY,
+        ).pack(side=tk.LEFT, padx=(4, 8))
 
         tk.Label(row1, text="最大视频:", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT, padx=(12, 0))
         self._crawl_max_var = tk.StringVar(value="5")
@@ -551,6 +625,12 @@ class BiliSpiderGUI:
         tk.Label(row1, text="代理:", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT, padx=(12, 0))
         self._crawl_proxy_entry = tk.Entry(row1, font=_FONT_BODY, width=24)
         self._crawl_proxy_entry.pack(side=tk.LEFT, padx=6)
+
+        row_video = tk.Frame(param_frame, bg=_COLOR_CARD)
+        row_video.pack(fill=tk.X, pady=(0, 4))
+        tk.Label(row_video, text="视频BV/URL:", font=_FONT_BODY, bg=_COLOR_CARD).pack(side=tk.LEFT)
+        self._crawl_video_entry = tk.Entry(row_video, font=_FONT_BODY, width=72)
+        self._crawl_video_entry.pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
 
         row_dates = tk.Frame(param_frame, bg=_COLOR_CARD)
         row_dates.pack(fill=tk.X, pady=(0, 4))
@@ -1124,8 +1204,10 @@ class BiliSpiderGUI:
     def _start_crawl(self) -> None:
         if self._crawling:
             return
+        mode = self._crawl_mode_var.get()
         uid = self._crawl_uid_entry.get().strip()
-        if not uid.isdigit():
+        video_input = self._crawl_video_entry.get().strip()
+        if mode == "uid" and not uid.isdigit():
             queue = self._load_queue()
             if queue:
                 uid = queue[0]
@@ -1134,8 +1216,11 @@ class BiliSpiderGUI:
             else:
                 messagebox.showwarning("提示", "请输入有效的 UID 或添加 UID 到待爬队列")
                 return
-        self._queue_continue = True
-        self._current_crawl_uid = uid
+        if mode == "video" and not video_input:
+            messagebox.showwarning("提示", "请输入视频 BV 号、av 号、aid 或 B站视频链接")
+            return
+        self._queue_continue = mode == "uid"
+        self._current_crawl_uid = uid if mode == "uid" else None
         max_videos = int(self._crawl_max_var.get() or 5)
         proxy = self._crawl_proxy_entry.get().strip()
         since_ts = 0
@@ -1172,9 +1257,14 @@ class BiliSpiderGUI:
         self._crawl_progress["value"] = 0
         self._crawl_progress_label.configure(text="")
         self._crawl_log_clear()
-        self._crawl_log_append(f"=== 开始爬取 UID={uid} ===\n")
+        if mode == "video":
+            self._crawl_log_append(f"=== 开始爬取单个视频 ===\n")
+            self._crawl_log_append(f"视频输入: {video_input}\n")
+        else:
+            self._crawl_log_append(f"=== 开始爬取 UID={uid} ===\n")
         self._crawl_log_append(f"时间范围: {since_label} 到 {until_label}\n")
-        if max_videos: self._crawl_log_append(f"视频限制: 最多 {max_videos} 个\n")
+        if mode == "uid" and max_videos:
+            self._crawl_log_append(f"视频限制: 最多 {max_videos} 个\n")
         if proxy: self._crawl_log_append(f"代理: {proxy}\n")
         self._crawl_log_append("")
 
@@ -1192,7 +1282,10 @@ class BiliSpiderGUI:
                 )
             crawler = CommentCrawler()
             crawler.configure(
-                since_ts=since_ts, until_ts=until_ts, max_videos=max_videos, proxies=proxies,
+                since_ts=since_ts,
+                until_ts=until_ts,
+                max_videos=1 if mode == "video" else max_videos,
+                proxies=proxies,
                 progress_callback=_on_progress,
                 rate_base=float(self._rate_base_var.get() or 2.0),
                 rate_jitter=float(self._rate_jitter_var.get() or 2.0),
@@ -1217,10 +1310,30 @@ class BiliSpiderGUI:
                 old_stdout = sys.stdout
                 sys.stdout = _LW()
                 try:
+                    video_info = None
+                    if mode == "video":
+                        self.root.after(
+                            0,
+                            lambda: self._crawl_log_append("正在解析视频信息...\n"),
+                        )
+                        video_info = self._resolve_video_input(video_input)
+                        self.root.after(
+                            0,
+                            lambda info=video_info: self._crawl_log_append(
+                                f"视频: {info.get('title', '')} "
+                                f"(aid={info.get('aid')}, bvid={info.get('bvid') or 'N/A'})\n"
+                            ),
+                        )
                     if not crawler.setup():
                         self.root.after(0, lambda: _finish_current_run("初始化失败: Cookie 无效"))
                         return
-                    r = crawler.crawl_by_uid(uid)
+                    if mode == "video" and video_info:
+                        r = crawler.crawl_by_video(
+                            int(video_info["aid"]),
+                            str(video_info.get("title") or ""),
+                        )
+                    else:
+                        r = crawler.crawl_by_uid(uid)
                     self.root.after(0, lambda rr=r: _finish_current_run(
                         f"完成! 一级:{rr.get('total_root',0)} 子评论:{rr.get('total_subs',0)} 总计:{rr.get('db_total',0)}"))
                 except Exception as e:
