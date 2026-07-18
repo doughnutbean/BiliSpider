@@ -87,6 +87,120 @@ _ONLINE_SEARCH_PAGE_SIZE = 100
 _ONLINE_SEARCH_CACHE_TTL = 6 * 3600
 _BV_PATTERN = re.compile(r"(BV[0-9A-Za-z]{10})", re.IGNORECASE)
 _AV_PATTERN = re.compile(r"(?:^|/)(?:av|AV)(\d+)")
+_INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_AI_ANALYSIS_SOP = """好的，这是为您导出的「B站用户成分分析标准作业程序（SOP）」，可直接交给其他AI使用。该文档整合了您此前提出的全部核心要求，并补充了判定标准与执行细节，确保分析结果的一致性和可复现性。
+
+---
+
+# B站用户评论数据深度分析指南（For AI）
+
+> 版本：2.0 | 适用场景：对单个B站用户的全部评论进行“成分”画像，判断其游戏偏好、立场倾向、是否为反串/乐子人
+
+---
+
+## 一、数据预处理
+
+1. **清洗数据**：剔除纯表情包、纯抽奖打卡、无实质内容的“复制粘贴式”评论（如“第一”“沙发”“已三连”）。
+2. **建立时间线**：按评论时间排序，从最早到最近。
+3. **分类标签**：对每条评论标记所属游戏/话题（如“原神”“鸣潮”“崩铁”“王者”“历史”“生活”等）。
+
+---
+
+## 二、核心分析框架（五步法）
+
+### 第一步：时间分段（**必须执行**）
+
+将用户的评论历史切分为 **3～4个阶段**，每阶段约6～12个月（视总时长调整），分别归纳：
+
+| 阶段 | 时间范围 | 活跃重心（游戏/圈子） | 典型评论内容 | 态度倾向 |
+|------|----------|------------------------|--------------|----------|
+| 早期 | 20xx年x月前 | 例：JOJO/Vtuber/王者 | 玩梗、打卡、浅层讨论 | 路人/轻度 |
+| 中期 | 20xx年x月～20xx年x月 | 例：原神深度玩家 | 配队、强度、抽卡规划 | 核心玩家 |
+| 近期 | 20xx年x月至今 | 例：鸣潮/绝区零 | 角色评价、版本吐槽 | 深度/批评 |
+
+**目的**：避免把用户多年前的言论与当前立场混为一谈，判断兴趣是否自然迁移。
+
+---
+
+### 第二步：核心兴趣识别
+
+从评论中提取以下维度：
+
+- **游戏主阵地**：哪个游戏出现频率最高？讨论深度如何（配队/机制 vs 纯抽卡记录）？
+- **社区行为模式**：是“攻略型”（给建议）、“体验型”（分享感受）还是“互动型”（大量@他人、玩梗）？
+- **表情包/黑话使用**：是否高频使用某一游戏专属表情包（如鸣潮、Mygo、腾讯招聘等）？是否熟练使用社区黑话（如“mxz”“库孝子”“飞榜”）？
+
+---
+
+### 第三步：立场与态度判断
+
+针对**涉及多个游戏的评论**，重点关注：
+
+| 态度类型 | 判定标准 | 示例 |
+|----------|----------|------|
+| **客观对比** | 并列优缺点，不贬低任何一方 | “原神大世界探索更舒服，鸣潮战斗更爽” |
+| **主观偏好** | 明确表达个人喜好，但不攻击他人 | “我更喜欢鸣潮的建模” |
+| **拉踩贬低** | 用一方贬低另一方，含嘲讽/侮辱性用语 | “鸣潮那流水也配和崩铁比？” |
+| **纯玩梗** | 无实质立场，仅为刷梗互动 | “我下的任务”“我是i鸣” |
+
+**⚠️ 关键判定：拉踩 ≠ 客观对比**
+- 拉踩一定有 **价值判断** 和 **情绪输出**。
+- 若用户同时玩两款游戏，但从未用一款踩另一款，则非拉踩。
+
+---
+
+### 第四步：“纯”与“串”判定（核心输出）
+
+| 类型 | 判定标准 |
+|------|----------|
+| **纯（真心玩家）** | 讨论游戏内容（角色、机制、剧情、配队），有实战体验，无伪装成分 |
+| **串（反串/乐子人）** | 伪装成某一方粉丝去攻击另一方，或频繁参与流水PVP、阵营对立 |
+| **玩（抽象乐子人）** | 不站任何阵营，把游戏区当社交游乐场，玩梗>游戏内容讨论 |
+| **米黑/米白** | 持续攻击或维护米哈游，且有明显阵营标签 |
+
+**判断依据**：
+- 是否参与 **流水对比/飞榜/登顶** 话题（串子高发区）
+- 是否持续 **贬低一方、抬高另一方**（串子）
+- 评论是否 **高度同质化**（如大量重复“我下的任务”）
+- 是否有 **自身游戏体验**（如“我抽了01雅，体验如下”）
+
+---
+
+### 第五步：综合画像输出
+
+最终输出应包含：
+
+1. **总体结论**（一句话定性：纯原玩家/鸣潮深度玩家/串子/乐子人等）
+2. **时间分段画像**（各阶段兴趣与态度变化）
+3. **拉踩检测结果**（有无、具体涉及哪些游戏）
+4. **“纯/串”判定依据**（简述关键证据）
+5. **风险提示**（过激言论、争议话题等）
+6. **最终用户画像**（年龄推测、性格、行为模式）
+
+---
+
+## 三、示例（精简版）
+
+> 用户A：评论集中在2024年至今，鸣潮占比80%，含大量配队建议和角色评价；曾多次提到“原神老玩家”，但未贬低原神；无流水PVP言论。
+> **结论**：纯鸣潮深度玩家，非串子。
+
+> 用户B：2023年Vtuber活跃，2024年转鸣潮，2025年大量重复“我下的任务”和表情包，极少讨论游戏内容。
+> **结论**：抽象乐子人，无实质阵营立场。
+
+---
+
+## 四、注意事项（避坑指南）
+
+- ❌ 不要把“玩梗”当成“拉踩”（如“不如原神”可能是反讽，需结合语境）。
+- ❌ 不要仅凭一条评论定性，需看整体趋势。
+- ❌ 不要在数据不足时强行下结论（如评论少于30条且高度同质化）。
+- ✅ 始终优先使用时间分段，避免历史言论误导。
+- ✅ 若用户有明确自我声明（如“我玩鸣潮但也玩原神”），以声明为准。
+
+---
+
+以上即完整分析指南，其他AI可直接套用此框架进行同类任务。
+"""
 
 
 # ─── 按钮样式辅助 ──────────────────────────────────────────
@@ -148,6 +262,7 @@ class BiliSpiderGUI:
         self._remote_sync_enabled_var = tk.BooleanVar(value=False)
         self._remote_sync_status_var = tk.StringVar(value="远端同步: 未开启")
         self._app_update_check_enabled_var = tk.BooleanVar(value=True)
+        self._search_delete_old_exports_var = tk.BooleanVar(value=False)
         self._app_update_status_var = tk.StringVar(value="软件更新: 未检查")
         self._status_bar_var = tk.StringVar(value="就绪")
 
@@ -221,6 +336,7 @@ class BiliSpiderGUI:
         self._search_uid_entry.delete(0, tk.END)
         self._search_uid_entry.insert(0, cfg.get("search_uid", "2"))
         self._search_online_limit_var.set(cfg.get("search_online_limit", "500"))
+        self._search_delete_old_exports_var.set(bool(cfg.get("search_delete_old_exports", False)))
         self._rate_base_var.set(cfg.get("rate_base", "1.5"))
         self._rate_jitter_var.set(cfg.get("rate_jitter", "1.0"))
         self._snooze_var.set(cfg.get("snooze", "10"))
@@ -257,6 +373,7 @@ class BiliSpiderGUI:
             "proxy": self._crawl_proxy_entry.get().strip(),
             "search_uid": self._search_uid_entry.get().strip(),
             "search_online_limit": self._search_online_limit_var.get(),
+            "search_delete_old_exports": self._search_delete_old_exports_var.get(),
             "rate_base": self._rate_base_var.get(),
             "rate_jitter": self._rate_jitter_var.get(),
             "snooze": self._snooze_var.get(),
@@ -939,6 +1056,18 @@ class BiliSpiderGUI:
         self._search_count_var = tk.StringVar(value="")
         tk.Label(search_row, textvariable=self._search_count_var,
                  font=_FONT_SMALL, bg=_COLOR_CARD, fg="#888").pack(side=tk.RIGHT)
+
+        search_option_row = tk.Frame(self._search_tab, bg=_COLOR_CARD)
+        search_option_row.pack(fill=tk.X, padx=8, pady=(0, 2))
+        tk.Checkbutton(
+            search_option_row,
+            text="导出新评论表格时清理同目录旧文件",
+            variable=self._search_delete_old_exports_var,
+            bg=_COLOR_CARD,
+            font=_FONT_SMALL,
+            anchor=tk.W,
+            command=self._save_config,
+        ).pack(side=tk.LEFT)
 
         self._search_result = scrolledtext.ScrolledText(
             self._search_tab, font=_FONT_MONO, wrap=tk.WORD,
@@ -1666,9 +1795,10 @@ class BiliSpiderGUI:
         else:
             summary = f"本地 {local_c} 条 = {len(merged)} 条 | 在线 API 不可用：{online_state['message']}"
 
+        username = self._lookup_bilibili_username(uid)
         self.root.after(0, lambda: self._search_count_var.set(summary))
         self.root.after(0, lambda: self._set_status(summary))
-        self.root.after(0, lambda: self._show_comment_table_v2(uid, merged, summary))
+        self.root.after(0, lambda: self._show_comment_table_v2(uid, merged, summary, username))
 
     def _to_int(self, value, default: int = 0) -> int:
         try:
@@ -1708,7 +1838,42 @@ class BiliSpiderGUI:
     def _comment_level(self, row: dict) -> str:
         return "二级" if self._comment_parent_value(row) > 0 else "一级"
 
-    def _show_comment_table_v2(self, uid: str, rows: list[dict], note: str) -> None:
+    def _lookup_bilibili_username(self, uid: str) -> str:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/119.0.0.0 Safari/537.36",
+            "Referer": f"https://space.bilibili.com/{uid}/",
+        }
+        try:
+            img_key, sub_key = get_wbi_keys()
+            params = enc_wbi({"mid": uid}, img_key, sub_key)
+            resp = requests.get(
+                "https://api.bilibili.com/x/space/wbi/acc/info",
+                params=params,
+                headers=headers,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("code") == 0:
+                return str(data.get("data", {}).get("name", "") or "").strip()
+        except Exception:
+            pass
+        try:
+            resp = requests.get(
+                "https://api.bilibili.com/x/space/acc/info",
+                params={"mid": uid},
+                headers=headers,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("code") == 0:
+                return str(data.get("data", {}).get("name", "") or "").strip()
+        except Exception:
+            pass
+        return ""
+
+    def _show_comment_table_v2(self, uid: str, rows: list[dict], note: str, username: str = "") -> None:
         """弹出融合结果表格窗口 (含来源列、关键词筛选、复制、导出)。"""
         win = tk.Toplevel(self.root)
         win.title(f"UID={uid} 的评论 ({len(rows)}条) {note}")
@@ -1775,11 +1940,15 @@ class BiliSpiderGUI:
                   font=("Microsoft YaHei", 8), relief=tk.FLAT, padx=8, cursor="hand2").pack(side=tk.LEFT)
 
         tk.Button(actions, text="导出Excel",
-                  command=lambda: self._export_to_excel_v2(uid, list(filtered_rows)),
+                  command=lambda: self._export_to_excel_v2(uid, list(filtered_rows), username),
                   bg=_COLOR_BILI_BLUE, fg="white", font=_FONT_BODY,
                   relief=tk.FLAT, padx=12, pady=2, cursor="hand2").pack(side=tk.RIGHT, padx=4)
+        tk.Button(actions, text="一键导出至AI",
+                  command=lambda: self._export_to_ai_bundle(uid, list(filtered_rows), username, note, win),
+                  bg="#16a085", fg="white", font=_FONT_BODY,
+                  relief=tk.FLAT, padx=12, pady=2, cursor="hand2").pack(side=tk.RIGHT, padx=4)
         tk.Button(actions, text="词云",
-                  command=lambda: self._generate_wordcloud_thread(uid, list(filtered_rows)),
+                  command=lambda: self._generate_wordcloud_thread(uid, list(filtered_rows), username),
                   bg="#8e44ad", fg="white", font=_FONT_BODY,
                   relief=tk.FLAT, padx=12, pady=2, cursor="hand2").pack(side=tk.RIGHT, padx=4)
 
@@ -1829,13 +1998,13 @@ class BiliSpiderGUI:
 
         self._set_status(f"检索完成: UID={uid}, {len(rows)} 条")
 
-    def _generate_wordcloud_thread(self, uid: str, rows: list[dict]) -> None:
+    def _generate_wordcloud_thread(self, uid: str, rows: list[dict], username: str = "") -> None:
         """在后台线程生成词云,完成后在主线程打开预览。"""
         if not rows:
             messagebox.showinfo("词云", "当前没有可生成词云的数据", parent=self.root)
             return
 
-        self._wordcloud_context = {"uid": uid, "rows": list(rows)}
+        self._wordcloud_context = {"uid": uid, "rows": list(rows), "username": username}
         self._set_status("正在生成词云...")
         import threading
 
@@ -1846,7 +2015,7 @@ class BiliSpiderGUI:
                 png_bytes, msg, top_words = None, f"词云生成异常: {e}", []
             self.root.after(
                 0,
-                lambda: self._show_wordcloud_preview(uid, list(rows), png_bytes, msg, top_words),
+                lambda: self._show_wordcloud_preview(uid, list(rows), png_bytes, msg, top_words, username),
             )
 
         t = threading.Thread(target=_run, daemon=True)
@@ -1854,7 +2023,8 @@ class BiliSpiderGUI:
 
     def _show_wordcloud_preview(self, uid: str, rows: list[dict],
                                  png_bytes: bytes | None, msg: str,
-                                 top_words: list[tuple[str, int]] | None = None) -> None:
+                                 top_words: list[tuple[str, int]] | None = None,
+                                 username: str = "") -> None:
         """显示词云预览窗口 (带保存按钮)。"""
         if png_bytes is None:
             self._set_status("词云: " + msg)
@@ -1998,10 +2168,10 @@ class BiliSpiderGUI:
         def _refresh_from_same_rows() -> None:
             if win.winfo_exists():
                 win.destroy()
-            self._generate_wordcloud_thread(uid, rows)
+            self._generate_wordcloud_thread(uid, rows, username)
 
         def _open_editor() -> None:
-            self._open_wordcloud_stopwords_editor(uid, rows, win)
+            self._open_wordcloud_stopwords_editor(uid, rows, username, win)
 
         tk.Button(bar, text="适应窗口", command=lambda: _set_zoom(1.0, fit=True),
                   bg="#666", fg="white", font=_FONT_BODY,
@@ -2017,7 +2187,7 @@ class BiliSpiderGUI:
                   relief=tk.FLAT, padx=10, pady=2, cursor="hand2").pack(side=tk.RIGHT, padx=4)
 
         def _save():
-            default_name = f"uid_{uid}_wordcloud.png"
+            default_name = self._comment_export_filename(username, uid, "评论词云", ".png")
             filepath = filedialog.asksaveasfilename(
                 parent=win, defaultextension=".png",
                 filetypes=[("PNG 图片", "*.png")],
@@ -2025,9 +2195,17 @@ class BiliSpiderGUI:
             )
             if filepath:
                 try:
+                    deleted_count = 0
+                    if self._search_delete_old_exports_var.get():
+                        deleted_count = len(self._cleanup_old_comment_exports(uid, [filepath]))
                     with open(filepath, "wb") as f:
                         f.write(png_bytes)
-                    messagebox.showinfo("保存成功", f"词云已保存到:\n{filepath}", parent=win)
+                    messagebox.showinfo(
+                        "保存成功",
+                        f"词云已保存到:\n{filepath}"
+                        f"{f'\n\n已清理旧文件：{deleted_count} 个。' if deleted_count else ''}",
+                        parent=win,
+                    )
                 except Exception as e:
                     messagebox.showerror("保存失败", str(e), parent=win)
 
@@ -2078,6 +2256,7 @@ class BiliSpiderGUI:
         win.after(50, _render_preview)
 
     def _open_wordcloud_stopwords_editor(self, uid: str, rows: list[dict],
+                                         username: str = "",
                                          preview_win: tk.Toplevel | None = None) -> None:
         """打开用户停用词编辑窗口。"""
         editor = tk.Toplevel(self.root)
@@ -2106,7 +2285,7 @@ class BiliSpiderGUI:
         def _refresh_preview() -> None:
             if preview_win is not None and preview_win.winfo_exists():
                 preview_win.destroy()
-            self._generate_wordcloud_thread(uid, rows)
+            self._generate_wordcloud_thread(uid, rows, username)
 
         def _save_and_refresh() -> None:
             try:
@@ -2205,37 +2384,196 @@ class BiliSpiderGUI:
         self.root.clipboard_append(text)
         self._set_status(f"已复制 {len(items)} 行到剪贴板")
 
-    def _export_to_excel_v2(self, uid: str, rows: list[dict]) -> None:
+    def _safe_export_name(self, username: str, uid: str) -> str:
+        base = (username or "").strip() or f"UID{uid}"
+        base = _INVALID_FILENAME_CHARS.sub("_", base)
+        base = re.sub(r"\s+", " ", base).strip(" .")
+        return base or f"UID{uid}"
+
+    def _comment_export_stem(self, username: str, uid: str) -> str:
+        return f"{self._safe_export_name(username, uid)}_{uid}"
+
+    def _comment_export_filename(self, username: str, uid: str, suffix: str, ext: str) -> str:
+        return f"{self._comment_export_stem(username, uid)}{suffix}{ext}"
+
+    def _comment_export_rows(self, rows: list[dict]) -> list[list[str]]:
+        export_rows: list[list[str]] = []
+        for r in rows:
+            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ctime"]))
+            export_rows.append([
+                str(r.get("source", "")),
+                str(r.get("rpid", "")),
+                str(r.get("oid", "")),
+                ts,
+                self._comment_level(r),
+                str(r.get("message", "")),
+            ])
+        return export_rows
+
+    def _write_comment_export_file(self, filepath: str, uid: str, rows: list[dict]) -> tuple[str, str]:
+        export_rows = self._comment_export_rows(rows)
+        try:
+            import openpyxl
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = f"UID={uid}"
+            ws.append(["来源", "rpid", "视频oid", "时间", "层级", "评论内容"])
+            for row in export_rows:
+                ws.append(row)
+            wb.save(filepath)
+            return filepath, "xlsx"
+        except ImportError:
+            csv_path = str(Path(filepath).with_suffix(".csv"))
+            import csv
+            with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["来源", "rpid", "视频oid", "时间", "层级", "评论内容"])
+                w.writerows(export_rows)
+            return csv_path, "csv"
+
+    def _build_ai_prompt_text(
+        self,
+        uid: str,
+        username: str,
+        rows: list[dict],
+        note: str,
+        table_filename: str,
+    ) -> str:
+        display_name = (username or "").strip() or f"UID{uid}"
+        meta = [
+            "请基于同目录中的评论表格完成分析。",
+            "",
+            "本次导出信息：",
+            f"- 用户昵称：{display_name}",
+            f"- 用户UID：{uid}",
+            f"- 导出评论数：{len(rows)}",
+            f"- 搜索结果摘要：{note}",
+            f"- 评论表格文件：{table_filename}",
+            "",
+            "执行约束：",
+            "- 关键结论尽量引用代表性评论、时间段或高频主题作为证据。",
+            "- 若样本不足、评论高度重复或语义不清，请明确写出“样本不足”，不要强行定性。",
+            "",
+            _AI_ANALYSIS_SOP.strip(),
+            "",
+        ]
+        return "\n".join(meta)
+
+    def _copy_text_to_clipboard(self, text: str) -> None:
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.root.update_idletasks()
+
+    def _cleanup_old_comment_exports(self, uid: str, keep_paths: list[str]) -> list[Path]:
+        keep_resolved: set[Path] = set()
+        for item in keep_paths:
+            try:
+                keep_resolved.add(Path(item).resolve())
+            except Exception:
+                continue
+
+        deleted: list[Path] = []
+        seen_dirs: set[Path] = set()
+        patterns = [
+            f"*_{uid}评论.xlsx",
+            f"*_{uid}评论.csv",
+            f"*_{uid}评论_AI提示词.txt",
+            f"*_{uid}评论词云.png",
+        ]
+        for keep_path in keep_resolved:
+            parent = keep_path.parent
+            if parent in seen_dirs or not parent.exists():
+                continue
+            seen_dirs.add(parent)
+            for pattern in patterns:
+                for candidate in parent.glob(pattern):
+                    try:
+                        resolved = candidate.resolve()
+                    except Exception:
+                        resolved = candidate
+                    if resolved in keep_resolved or not candidate.is_file():
+                        continue
+                    try:
+                        candidate.unlink()
+                        deleted.append(candidate)
+                    except Exception:
+                        continue
+        return deleted
+
+    def _export_to_excel_v2(self, uid: str, rows: list[dict], username: str = "") -> None:
         """导出融合结果为 Excel（含来源列）。"""
+        default_name = self._comment_export_filename(username, uid, "评论", ".xlsx")
         filepath = filedialog.asksaveasfilename(
             defaultextension=".xlsx",
             filetypes=[("Excel文件", "*.xlsx")],
-            initialfile=f"{uid}_评论数据.xlsx")
+            initialfile=default_name)
         if not filepath:
             return
         try:
-            import openpyxl
-            wb = openpyxl.Workbook(); ws = wb.active
-            ws.title = f"UID={uid}"
-            ws.append(["来源", "rpid", "视频oid", "时间", "层级", "评论内容"])
-            for r in rows:
-                ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ctime"]))
-                ws.append([r["source"], r["rpid"], r["oid"], ts,
-                           self._comment_level(r), str(r["message"])])
-            wb.save(filepath)
-            messagebox.showinfo("导出成功", f"已保存到:\n{filepath}")
-        except ImportError:
-            # 回退到 CSV
-            filepath = filepath.replace(".xlsx", ".csv")
-            import csv
-            with open(filepath, "w", encoding="utf-8-sig", newline="") as f:
-                w = csv.writer(f)
-                w.writerow(["来源", "rpid", "视频oid", "时间", "层级", "评论内容"])
-                for r in rows:
-                    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ctime"]))
-                    w.writerow([r["source"], r["rpid"], r["oid"], ts,
-                                self._comment_level(r), str(r["message"])])
-            messagebox.showinfo("导出成功", f"已保存为CSV:\n{filepath}")
+            if self._search_delete_old_exports_var.get():
+                self._cleanup_old_comment_exports(uid, [filepath])
+            saved_path, file_type = self._write_comment_export_file(filepath, uid, rows)
+        except Exception as exc:
+            messagebox.showerror("导出失败", str(exc), parent=self.root)
+            return
+        if file_type == "xlsx":
+            messagebox.showinfo("导出成功", f"已保存到:\n{saved_path}", parent=self.root)
+        else:
+            messagebox.showinfo("导出成功", f"已保存为CSV:\n{saved_path}", parent=self.root)
+
+    def _export_to_ai_bundle(
+        self,
+        uid: str,
+        rows: list[dict],
+        username: str,
+        note: str,
+        parent: tk.Misc | None = None,
+    ) -> None:
+        if not rows:
+            messagebox.showinfo("一键导出至AI", "当前没有可导出的评论数据。", parent=parent or self.root)
+            return
+
+        default_name = self._comment_export_filename(username, uid, "评论", ".xlsx")
+        table_path = filedialog.asksaveasfilename(
+            parent=parent or self.root,
+            defaultextension=".xlsx",
+            filetypes=[("Excel文件", "*.xlsx")],
+            initialfile=default_name,
+        )
+        if not table_path:
+            return
+
+        deleted_count = 0
+        try:
+            prompt_path = str(Path(table_path).with_name(
+                f"{Path(table_path).stem}_AI提示词.txt"
+            ))
+            if self._search_delete_old_exports_var.get():
+                deleted_count = len(self._cleanup_old_comment_exports(uid, [table_path, prompt_path]))
+            saved_table_path, _file_type = self._write_comment_export_file(table_path, uid, rows)
+            prompt_path = str(Path(saved_table_path).with_name(
+                f"{Path(saved_table_path).stem}_AI提示词.txt"
+            ))
+            prompt_text = self._build_ai_prompt_text(
+                uid,
+                username,
+                rows,
+                note,
+                Path(saved_table_path).name,
+            )
+            Path(prompt_path).write_text(prompt_text, encoding="utf-8", newline="\n")
+            self._copy_text_to_clipboard(prompt_text)
+        except Exception as exc:
+            messagebox.showerror("一键导出至AI失败", str(exc), parent=parent or self.root)
+            return
+
+        self._set_status(f"已导出 AI 分析包: UID={uid}, {len(rows)} 条评论")
+        messagebox.showinfo(
+            "一键导出至AI",
+            f"评论表格已导出：\n{saved_table_path}\n\nAI提示词已生成：\n{prompt_path}"
+            f"{f'\n\n已清理旧文件：{deleted_count} 个。' if deleted_count else ''}\n\n提示词已复制到剪贴板。",
+            parent=parent or self.root,
+        )
 
     # ─── 数据协作逻辑 ───────────────────────────────────────────
 
