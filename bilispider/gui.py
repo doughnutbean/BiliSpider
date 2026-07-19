@@ -254,6 +254,8 @@ class BiliSpiderGUI:
         self._remote_sync_running = False
         self._app_update_check_running = False
         self._publish_running = False
+        self._username_cache_ttl = 600
+        self._username_cache: dict[str, tuple[str, int]] = {}
         self._config: dict = {}
 
         # UI 变量
@@ -1857,32 +1859,66 @@ class BiliSpiderGUI:
         try:
             img_key, sub_key = get_wbi_keys()
             params = enc_wbi({"mid": uid}, img_key, sub_key)
-            resp = requests.get(
+            data = self._http_get_json(
                 "https://api.bilibili.com/x/space/wbi/acc/info",
                 params=params,
                 headers=headers,
+                proxy="",
                 timeout=10,
             )
-            resp.raise_for_status()
-            data = resp.json()
             if data.get("code") == 0:
                 return str(data.get("data", {}).get("name", "") or "").strip()
         except Exception:
             pass
         try:
-            resp = requests.get(
+            data = self._http_get_json(
                 "https://api.bilibili.com/x/space/acc/info",
                 params={"mid": uid},
                 headers=headers,
+                proxy="",
                 timeout=10,
             )
-            resp.raise_for_status()
-            data = resp.json()
             if data.get("code") == 0:
                 return str(data.get("data", {}).get("name", "") or "").strip()
         except Exception:
             pass
         return ""
+
+    def _get_cached_username(self, uid: str) -> str:
+        cached = self._username_cache.get(str(uid))
+        if not cached:
+            return ""
+        username, expires_at = cached
+        if int(time.time()) >= expires_at:
+            self._username_cache.pop(str(uid), None)
+            return ""
+        return str(username or "").strip()
+
+    def _cache_username(self, uid: str, username: str) -> None:
+        cleaned = str(username or "").strip()
+        if not cleaned:
+            return
+        self._username_cache[str(uid)] = (
+            cleaned,
+            int(time.time()) + int(self._username_cache_ttl),
+        )
+
+    def _resolve_export_username(self, uid: str, username: str = "") -> str:
+        current = str(username or "").strip()
+        fallback = current or f"UID{uid}"
+        if current and current != f"UID{uid}":
+            self._cache_username(uid, current)
+            return current
+
+        cached = self._get_cached_username(uid)
+        if cached:
+            return cached
+
+        resolved = self._lookup_bilibili_username(uid)
+        if resolved:
+            self._cache_username(uid, resolved)
+            return resolved
+        return fallback
 
     def _show_comment_table_v2(self, uid: str, rows: list[dict], note: str, username: str = "") -> None:
         """弹出融合结果表格窗口 (含来源列、关键词筛选、复制、导出)。"""
@@ -2198,7 +2234,8 @@ class BiliSpiderGUI:
                   relief=tk.FLAT, padx=10, pady=2, cursor="hand2").pack(side=tk.RIGHT, padx=4)
 
         def _save():
-            default_name = self._comment_export_filename(username, uid, "评论词云", ".png")
+            export_username = self._resolve_export_username(uid, username)
+            default_name = self._comment_export_filename(export_username, uid, "评论词云", ".png")
             filepath = filedialog.asksaveasfilename(
                 parent=win, defaultextension=".png",
                 filetypes=[("PNG 图片", "*.png")],
@@ -2402,7 +2439,7 @@ class BiliSpiderGUI:
         return base or f"UID{uid}"
 
     def _comment_export_stem(self, username: str, uid: str) -> str:
-        return f"{self._safe_export_name(username, uid)}_{uid}"
+        return f"{self._safe_export_name(username, uid)}（{uid}）"
 
     def _comment_export_filename(self, username: str, uid: str, suffix: str, ext: str) -> str:
         return f"{self._comment_export_stem(username, uid)}{suffix}{ext}"
@@ -2486,10 +2523,10 @@ class BiliSpiderGUI:
         deleted: list[Path] = []
         seen_dirs: set[Path] = set()
         patterns = [
-            f"*_{uid}评论.xlsx",
-            f"*_{uid}评论.csv",
-            f"*_{uid}评论_AI提示词.txt",
-            f"*_{uid}评论词云.png",
+            f"*（{uid}）评论.xlsx",
+            f"*（{uid}）评论.csv",
+            f"*（{uid}）评论_AI提示词.txt",
+            f"*（{uid}）评论词云.png",
         ]
         for keep_path in keep_resolved:
             parent = keep_path.parent
@@ -2513,7 +2550,8 @@ class BiliSpiderGUI:
 
     def _export_to_excel_v2(self, uid: str, rows: list[dict], username: str = "") -> None:
         """导出融合结果为 Excel（含来源列）。"""
-        default_name = self._comment_export_filename(username, uid, "评论", ".xlsx")
+        export_username = self._resolve_export_username(uid, username)
+        default_name = self._comment_export_filename(export_username, uid, "评论", ".xlsx")
         filepath = filedialog.asksaveasfilename(
             defaultextension=".xlsx",
             filetypes=[("Excel文件", "*.xlsx")],
@@ -2544,7 +2582,8 @@ class BiliSpiderGUI:
             messagebox.showinfo("一键导出至AI", "当前没有可导出的评论数据。", parent=parent or self.root)
             return
 
-        default_name = self._comment_export_filename(username, uid, "评论", ".xlsx")
+        export_username = self._resolve_export_username(uid, username)
+        default_name = self._comment_export_filename(export_username, uid, "评论", ".xlsx")
         table_path = filedialog.asksaveasfilename(
             parent=parent or self.root,
             defaultextension=".xlsx",
@@ -2567,7 +2606,7 @@ class BiliSpiderGUI:
             ))
             prompt_text = self._build_ai_prompt_text(
                 uid,
-                username,
+                export_username,
                 rows,
                 note,
                 Path(saved_table_path).name,

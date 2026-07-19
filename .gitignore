@@ -1,4 +1,4 @@
-# Python
+﻿# Python
 __pycache__/
 *.py[cod]
 *.so
@@ -56,7 +56,7 @@ datasets/test_*.jsonl
 data/remote_sync_state.json
 
 #agents
-codewhale-直连.bat
+codewhale-鐩磋繛.bat
 
 # Analysis / debug tools
 analyze_page.py
@@ -64,6 +64,6 @@ cdp_capture.py
 
 #testfiles
 *.xlsx
-*_*评论.csv
-*_*评论_AI提示词.txt
-*_*评论词云.png
+*（*）评论.csv
+*（*）评论_AI提示词.txt
+*（*）评论词云.png
